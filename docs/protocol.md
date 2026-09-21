@@ -1,6 +1,6 @@
 # C2C Agent Protocol
 
-Control plane: Computer Use (tiny structured messages typed into the ChatGPT UI).
+Control plane: manual browser handoff (tiny structured messages copied between Codex CLI and ChatGPT Web).
 Data plane: MCP (ChatGPT pulls files, diffs, search results itself).
 
 Never mix the two: control messages carry state, never content.
@@ -166,7 +166,7 @@ NEEDS:
   conversation starts a new chat **inside that Project**. The same Codex
   conversation keeps using its saved chat URL.
 
-Right after the boot prompt, Codex sends a HANDOFF so the new chat can
+Right after the user pastes the boot prompt, Codex produces a HANDOFF for the user to paste so the new chat can
 continue — a brief, never a data dump (the new chat re-reads code via MCP).
 Project instructions and project-only memory hold durable workspace identity.
 HANDOFF still wins for the current task:
@@ -245,7 +245,7 @@ Rules:
 ## Project instructions
 
 New workspaces store durable identity in the ChatGPT Project settings
-(指令), not in every boot prompt. The Skill fills this template once.
+(指令), not in every boot prompt. In CLI-only mode the user can paste this template into Project instructions once.
 Never put a public or temporary URL in the instructions — only the
 connector **name**.
 
