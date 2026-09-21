@@ -1,0 +1,187 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    # 09:15 Asia/Shanghai every day (GitHub cron uses UTC)
+    - cron: "15 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: XiaoDuoYa/codex-with-chatgpt
+  UPSTREAM_BRANCH: main
+  SYNC_BRANCH: automation/upstream-sync
+  SYNC_LABEL: upstream-sync
+  CONFLICT_LABEL: upstream-sync-conflict
+  OWNER_LOGIN: BugBubbles
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "upstream-sync[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git fetch --prune upstream "${UPSTREAM_BRANCH}"
+
+      - name: Check whether upstream has new commits
+        id: check
+        shell: bash
+        run: |
+          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" HEAD; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Fork main already contains all commits from upstream/${UPSTREAM_BRANCH}."
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "upstream_sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")" >> "$GITHUB_OUTPUT"
+            echo "upstream_short_sha=$(git rev-parse --short "upstream/${UPSTREAM_BRANCH}")" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare sync branch
+        if: steps.check.outputs.needed == 'true'
+        id: merge
+        shell: bash
+        run: |
+          git checkout -B "${SYNC_BRANCH}" origin/main
+
+          set +e
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}"
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            echo "conflict_files<<EOF" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+          else
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push sync branch
+        if: steps.check.outputs.needed == 'true' && steps.merge.outputs.conflict == 'false'
+        run: |
+          git push --force-with-lease origin "HEAD:refs/heads/${SYNC_BRANCH}"
+
+      - name: Create or refresh sync PR
+        if: steps.check.outputs.needed == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.check.outputs.upstream_sha }}
+          UPSTREAM_SHORT_SHA: ${{ steps.check.outputs.upstream_short_sha }}
+        shell: bash
+        run: |
+          gh label create "${SYNC_LABEL}"             --repo "$GITHUB_REPOSITORY"             --color "1D76DB"             --description "Automated pull from the upstream repository"             --force
+
+          pr_number="$(gh pr list             --repo "$GITHUB_REPOSITORY"             --base main             --head "${SYNC_BRANCH}"             --state open             --json number             --jq '.[0].number // empty')"
+
+          body="$(cat <<EOF
+          ## Upstream update detected
+
+          The sync robot fetched the latest changes from:
+          `${UPSTREAM_REPO}@${UPSTREAM_BRANCH}`
+
+          Upstream commit:
+          `${UPSTREAM_SHA}`
+
+          This PR deliberately **does not auto-merge** because this fork carries
+          CLI-only changes that may overlap with upstream changes.
+
+          Please review the diff, especially:
+
+          - `skill/SKILL.md`
+          - `README.md`
+          - `README.zh-CN.md`
+          - browser / Codex Desktop assumptions
+          - protocol and connector setup changes
+
+          After review, merge this PR manually if the upstream changes are safe
+          for the CLI-only fork.
+
+          _Created/updated automatically by the upstream sync robot._
+          EOF
+          )"
+
+          if [ -z "$pr_number" ]; then
+            gh pr create               --repo "$GITHUB_REPOSITORY"               --base main               --head "${SYNC_BRANCH}"               --title "chore: sync upstream ${UPSTREAM_SHORT_SHA}"               --body "$body"               --label "${SYNC_LABEL}"               --assignee "${OWNER_LOGIN}"
+          else
+            gh pr edit "$pr_number"               --repo "$GITHUB_REPOSITORY"               --title "chore: sync upstream ${UPSTREAM_SHORT_SHA}"               --body "$body"               --add-label "${SYNC_LABEL}"               --add-assignee "${OWNER_LOGIN}"
+          fi
+
+      - name: Close stale conflict reminder
+        if: steps.check.outputs.needed == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          issue_numbers="$(gh issue list             --repo "$GITHUB_REPOSITORY"             --state open             --label "${CONFLICT_LABEL}"             --json number             --jq '.[].number')"
+
+          for n in $issue_numbers; do
+            gh issue close "$n"               --repo "$GITHUB_REPOSITORY"               --comment "The latest upstream state now merges cleanly. The sync PR has been created or refreshed."
+          done
+
+      - name: Create or refresh conflict reminder
+        if: steps.check.outputs.needed == 'true' && steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFLICT_FILES: ${{ steps.merge.outputs.conflict_files }}
+          UPSTREAM_SHA: ${{ steps.check.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          gh label create "${CONFLICT_LABEL}"             --repo "$GITHUB_REPOSITORY"             --color "D73A4A"             --description "Upstream sync requires manual conflict resolution"             --force
+
+          issue_number="$(gh issue list             --repo "$GITHUB_REPOSITORY"             --state open             --label "${CONFLICT_LABEL}"             --json number             --jq '.[0].number // empty')"
+
+          body="$(cat <<EOF
+          ## Upstream sync needs manual conflict resolution
+
+          Upstream:
+          `${UPSTREAM_REPO}@${UPSTREAM_BRANCH}`
+
+          Upstream commit:
+          `${UPSTREAM_SHA}`
+
+          Conflicting files:
+
+          ```
+          ${CONFLICT_FILES}
+          ```
+
+          The robot did **not** modify `main` and did not force a conflicted
+          merge. Please resolve these conflicts manually, preserving the
+          CLI-only behavior of this fork.
+
+          _Created/updated automatically by the upstream sync robot._
+          EOF
+          )"
+
+          if [ -z "$issue_number" ]; then
+            gh issue create               --repo "$GITHUB_REPOSITORY"               --title "Upstream sync conflict requires review"               --body "$body"               --label "${CONFLICT_LABEL}"               --assignee "${OWNER_LOGIN}"
+          else
+            gh issue edit "$issue_number"               --repo "$GITHUB_REPOSITORY"               --title "Upstream sync conflict requires review"               --body "$body"               --add-assignee "${OWNER_LOGIN}"
+          fi
+
+      - name: Nothing to sync
+        if: steps.check.outputs.needed == 'false'
+        run: echo "No upstream update detected."
