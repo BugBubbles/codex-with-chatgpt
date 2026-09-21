@@ -2,8 +2,8 @@ name: Upstream Sync
 
 on:
   schedule:
-    # 09:15 Asia/Shanghai every day (GitHub cron uses UTC)
-    - cron: "15 1 * * *"
+    # 09:15 Asia/Shanghai every Monday (GitHub cron uses UTC)
+    - cron: "15 1 * * 1"
   workflow_dispatch:
   push:
     branches: [main]
