@@ -5,6 +5,10 @@ on:
     # 09:15 Asia/Shanghai every day (GitHub cron uses UTC)
     - cron: "15 1 * * *"
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/upstream-sync.yml"
 
 permissions:
   contents: write
