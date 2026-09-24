@@ -1,9 +1,29 @@
 # C2C Agent Protocol
 
-Control plane: manual browser handoff (tiny structured messages copied between Codex CLI and ChatGPT Web).
-Data plane: MCP (ChatGPT pulls files, diffs, search results itself).
+Preferred control plane: scoped MCP task dispatch (`submit_codex_task` / `codex_task_status` /
+`cancel_codex_task`) when the connector has `execution.write`.
+Data plane: MCP read tools for files, diffs, search results and sanitized execution output.
+Manual browser handoff remains the fallback protocol for old/read-only connectors.
 
-Never mix the two: control messages carry state, never content.
+Never expose raw shell commands through the protocol. Direct mode carries a goal; manual
+control messages carry state, never file bodies, diffs or logs.
+
+## Direct execution mode
+
+When `submit_codex_task` is available and the user asks ChatGPT to implement or modify
+workspace code, ChatGPT may submit a concrete goal directly instead of returning a manual
+`STATE: PLAN` message.
+
+1. Inspect the minimum necessary code through the read tools.
+2. Call `submit_codex_task` with a bounded implementation goal. Do not send a shell command.
+3. Poll `codex_task_status` until the state is terminal.
+4. If an `outputId` is present, read it through `execution_output` when allowed.
+5. Independently inspect `git_diff` and relevant files.
+6. If review finds a concrete issue, submit another bounded Codex task; otherwise report completion.
+7. Use `cancel_codex_task` if the user asks to stop or the task is clearly no longer appropriate.
+
+Only one remotely submitted task can run at a time. A completed task may have partial edits
+even when its status is `failed` or `cancelled`, so review git state in every terminal case.
 
 ## States
 
@@ -221,15 +241,16 @@ Rules:
 2. Inspect only the files needed for the task.
 3. Use MCP to inspect current code, git status and diff.
 4. Produce concise executable plans.
-5. Codex will execute your plan using its own harness.
-6. After Codex reports EXECUTED, independently inspect the diff.
+5. If submit_codex_task is available and execution is authorized, prefer direct task dispatch;
+   otherwise use the manual C2C PLAN flow below.
+6. After any Codex task completes or Codex reports EXECUTED, independently inspect the diff.
    If execution_output lists a readable item for this iteration, list
    then read it. If status is restricted, ignore the body and review
    from git.
 7. Do not assume an implementation succeeded just because Codex says so.
 8. Continue until the implementation satisfies the success criteria.
 9. Avoid unnecessary rewrites.
-10. Return C2C structured control messages.
+10. Return C2C structured control messages only when using the manual fallback flow.
 11. Be substantive. PLAN and review replies must carry enough signal for
     Codex to act on: rationale, per-file natural-language suggestions
     (which file, what to change and why), risks worth checking, and test
