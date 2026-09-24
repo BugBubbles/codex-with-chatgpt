@@ -222,6 +222,14 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       fail("invalid_request", "PKCE with S256 is required");
       return;
     }
+    const requestedScopes = query.scope?.split(/[\s+]+/).filter(Boolean) ?? [];
+    const unsupportedScopes = requestedScopes.filter(
+      (scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope)
+    );
+    if (unsupportedScopes.length > 0) {
+      fail("invalid_scope", "One or more requested scopes are not supported");
+      return;
+    }
     const scopes = filterScopes(query.scope);
     const request: PendingAuthRequest = {
       id: randomBytes(16).toString("hex"),
