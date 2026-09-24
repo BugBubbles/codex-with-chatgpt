@@ -126,7 +126,7 @@ C2C Bridge ----> 本地 Codex CLI ----> 工作区修改/测试
 ```
 
 远程任务使用非交互 `codex exec`，固定为 `workspace-write` 沙箱、
-`never` 审批模式、临时会话并关闭网络访问；同一工作区同时只允许一个远程任务。
+`approval_policy="never"`、临时会话并关闭网络访问；同一工作区同时只允许一个远程任务。
 任务结束后 ChatGPT 应继续通过 `git_diff` 独立审查结果。
 
 原来的 INIT / PLAN / EXECUTED 人工复制流程仍保留，适用于没有授权
