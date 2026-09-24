@@ -236,6 +236,23 @@ describe("authorization + token flow", () => {
     expect(second.status).toBe(400);
   });
 
+  it("rejects unsupported scopes instead of falling back to full access", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("scope", "totally.unknown.scope");
+
+    const response = await fetch(authorizeUrl, { redirect: "manual" });
+    expect(response.status).toBe(302);
+    const location = response.headers.get("location") ?? "";
+    expect(location).toContain("error=invalid_scope");
+  });
+
   it("requires PKCE at the authorization endpoint", async () => {
     const clientId = await registerClient();
     const authorizeUrl = new URL(`${base}/oauth/authorize`);
