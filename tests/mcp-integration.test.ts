@@ -43,6 +43,20 @@ function expectToolOutputSchema(
 
 beforeAll(async () => {
   stateDir = isolateStateDir();
+  const codexStub = write(
+    stateDir,
+    "codex-stub.mjs",
+    `import fs from "node:fs";
+let prompt = "";
+for await (const chunk of process.stdin) prompt += chunk.toString();
+if (prompt.includes("C2C_TEST_SLOW")) {
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+} else {
+  fs.writeFileSync("remote-task.txt", "written by remote codex task\\n");
+}
+process.stdout.write(JSON.stringify({ type: "result", promptReceived: prompt.length > 0 }) + "\\n");
+`
+  );
   root = makeTmpDir("mcp-ws");
   makeGitRepo(root);
   write(root, "package.json", JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, dependencies: { react: "^19.0.0" } }));
@@ -55,10 +69,12 @@ beforeAll(async () => {
     port: 0,
     persistRuntime: false,
     authStoreFile: path.join(makeTmpDir("auth"), "store.json"),
+    codexCommand: process.execPath,
+    codexArgsPrefix: [codexStub],
   });
   const tokens = bridge.authStore.issueTokens({
     clientId: "it-client",
-    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read"],
+    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read", "execution.write"],
   });
   accessToken = tokens.accessToken;
 
@@ -76,10 +92,12 @@ afterAll(async () => {
 });
 
 describe("MCP tools over Streamable HTTP", () => {
-  it("lists all nine read-only tools", async () => {
+  it("lists read tools plus scoped Codex task controls", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
+      "cancel_codex_task",
+      "codex_task_status",
       "execution_output",
       "execution_summary",
       "git_diff",
@@ -87,10 +105,11 @@ describe("MCP tools over Streamable HTTP", () => {
       "list_directory",
       "read_file",
       "search_workspace",
+      "submit_codex_task",
       "test_status",
       "workspace_info",
     ]);
-    // no write tools in V1
+    // Still no raw filesystem or shell primitives: execution is mediated by Codex.
     for (const forbidden of ["write_file", "delete_file", "execute_shell", "git_commit", "install_package"]) {
       expect(names).not.toContain(forbidden);
     }
@@ -104,6 +123,9 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
     expectToolOutputSchema(tools, "execution_summary", ["records"]);
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
+    expectToolOutputSchema(tools, "submit_codex_task", ["taskId", "status", "outputId"]);
+    expectToolOutputSchema(tools, "codex_task_status", ["taskId", "status", "outputId"]);
+    expectToolOutputSchema(tools, "cancel_codex_task", ["taskId", "status", "outputId"]);
   });
 
   it("documents git_diff pagination with its output field names", async () => {
@@ -297,6 +319,56 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(textOf(missing)).toContain("NOT_FOUND");
   });
 
+  it("submits a Codex task, observes completion, and exposes sanitized output", async () => {
+    const submitted = structuredJsonOf<{ taskId: string; status: string }>(
+      await client.callTool({
+        name: "submit_codex_task",
+        arguments: { goal: "Create remote-task.txt for the integration test." },
+      })
+    );
+    expect(submitted.status).toBe("running");
+
+    let terminal: { taskId: string; status: string; outputId: number | null } | null = null;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const current = structuredJsonOf<{ taskId: string; status: string; outputId: number | null }>(
+        await client.callTool({ name: "codex_task_status", arguments: { task_id: submitted.taskId } })
+      );
+      if (current.status !== "running") {
+        terminal = current;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(terminal?.status).toBe("succeeded");
+    expect(terminal?.outputId).toEqual(expect.any(Number));
+    expect(fs.readFileSync(path.join(root, "remote-task.txt"), "utf8")).toContain("written by remote codex task");
+
+    const output = structuredJsonOf<{ action: string; text: string }>(
+      await client.callTool({
+        name: "execution_output",
+        arguments: { action: "read", id: terminal!.outputId! },
+      })
+    );
+    expect(output.text).toContain("promptReceived");
+  });
+
+  it("cancels a running Codex task", async () => {
+    const submitted = structuredJsonOf<{ taskId: string }>(
+      await client.callTool({
+        name: "submit_codex_task",
+        arguments: { goal: "C2C_TEST_SLOW" },
+      })
+    );
+    const cancelled = structuredJsonOf<{ taskId: string; status: string }>(
+      await client.callTool({
+        name: "cancel_codex_task",
+        arguments: { task_id: submitted.taskId },
+      })
+    );
+    expect(cancelled.taskId).toBe(submitted.taskId);
+    expect(cancelled.status).toBe("cancelled");
+  });
+
   it("enforces scopes per tool", async () => {
     const limited = bridge.authStore.issueTokens({ clientId: "limited", scopes: ["workspace.read"] });
     const limitedClient = new Client({ name: "limited", version: "1.0.0" });
@@ -313,6 +385,12 @@ describe("MCP tools over Streamable HTTP", () => {
     });
     expect(outputDenied.isError).toBe(true);
     expect(textOf(outputDenied)).toContain("INSUFFICIENT_SCOPE");
+    const executeDenied = await limitedClient.callTool({
+      name: "submit_codex_task",
+      arguments: { goal: "This must not run." },
+    });
+    expect(executeDenied.isError).toBe(true);
+    expect(textOf(executeDenied)).toContain("INSUFFICIENT_SCOPE");
     const allowed = await limitedClient.callTool({ name: "read_file", arguments: { path: "hello.txt" } });
     expect(allowed.isError ?? false).toBe(false);
     await limitedClient.close();
