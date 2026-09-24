@@ -47,6 +47,19 @@ beforeAll(async () => {
     stateDir,
     "codex-stub.mjs",
     `import fs from "node:fs";
+const argv = process.argv.slice(2);
+const required = ["exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "--cd"];
+for (const value of required) {
+  if (!argv.includes(value)) {
+    process.stderr.write("missing expected arg: " + value + "\\n");
+    process.exit(2);
+  }
+}
+const configPairs = argv.flatMap((value, index) => value === "--config" ? [argv[index + 1]] : []);
+if (!configPairs.includes('approval_policy="never"') || !configPairs.includes("sandbox_workspace_write.network_access=false")) {
+  process.stderr.write("missing security config override\\n");
+  process.exit(2);
+}
 let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk.toString();
 if (prompt.includes("C2C_TEST_SLOW")) {
