@@ -92,6 +92,12 @@ Useful ChatGPT pages:
   `https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins`
 
 ## Normal workflow
+> **WSL note:** the bridge launches `codex` in the same OS environment in which
+> `c2c start` is running. If Codex CLI exists only inside WSL, start/build/run C2C
+> inside that WSL environment (the normal CLI-only setup does this). A Windows-native
+> bridge does not automatically jump into WSL. `C2C_CODEX_BIN` can override the local
+> Codex executable path when needed.
+
 
 Preferred direct workflow after authorizing `execution.write`:
 
