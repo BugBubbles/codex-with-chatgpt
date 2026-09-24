@@ -246,10 +246,22 @@ export class CodexTaskManager {
     return this.snapshot(task);
   }
 
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     for (const task of this.tasks.values()) {
       if (!task.finalized && !task.terminationStatus) {
         this.requestTermination(task, "cancelled", "Bridge is shutting down.");
+      }
+    }
+
+    const deadline = Date.now() + 3000;
+    while ([...this.tasks.values()].some((task) => !task.finalized) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    for (const task of this.tasks.values()) {
+      if (!task.finalized) {
+        this.signalTask(task, "SIGKILL");
+        this.finalize(task, "cancelled", null, task.terminationError ?? "Bridge is shutting down.");
       }
     }
   }
