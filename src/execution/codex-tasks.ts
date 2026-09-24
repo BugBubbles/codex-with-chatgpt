@@ -99,7 +99,7 @@ export class CodexTaskManager {
     private readonly logger: Logger,
     opts: CodexTaskManagerOptions = {}
   ) {
-    this.command = opts.command ?? process.env.C2C_CODEX_BIN?.trim() || "codex";
+    this.command = opts.command ?? (process.env.C2C_CODEX_BIN?.trim() || "codex");
     this.argsPrefix = opts.argsPrefix ?? [];
     this.maxCapturedChars = opts.maxCapturedChars ?? DEFAULT_MAX_CAPTURED_CHARS;
   }
