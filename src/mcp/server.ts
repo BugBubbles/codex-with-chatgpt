@@ -182,7 +182,7 @@ const executionOutputOutputSchema = {
 
 const codexTaskOutputSchema = {
   taskId: z.string(),
-  status: z.enum(["running", "succeeded", "failed", "cancelled"]),
+  status: z.enum(["running", "cancelling", "succeeded", "failed", "cancelled"]),
   submittedAt: z.string(),
   startedAt: z.string(),
   finishedAt: z.string().nullable(),
