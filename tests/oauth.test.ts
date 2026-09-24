@@ -95,9 +95,10 @@ describe("discovery metadata", () => {
   it("serves protected resource metadata", async () => {
     const response = await fetch(`${base}/.well-known/oauth-protected-resource/mcp`);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { resource: string; authorization_servers: string[] };
+    const body = (await response.json()) as { resource: string; authorization_servers: string[]; scopes_supported: string[] };
     expect(body.resource).toContain("/mcp");
     expect(body.authorization_servers.length).toBe(1);
+    expect(body.scopes_supported).toContain("execution.write");
   });
 
   it("serves authorization server metadata with PKCE S256", async () => {
@@ -106,6 +107,7 @@ describe("discovery metadata", () => {
     expect(body.code_challenge_methods_supported).toEqual(["S256"]);
     expect(body.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
     expect(body.registration_endpoint).toContain("/oauth/register");
+    expect(body.scopes_supported).toEqual(expect.arrayContaining(["execution.read", "execution.write"]));
   });
 });
 
