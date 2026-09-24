@@ -6,7 +6,7 @@ import { gitStatus } from "../workspace/git.js";
 import { saveExecutionOutput } from "./output.js";
 import { appendExecutionRecord } from "./records.js";
 
-export type CodexTaskState = "running" | "succeeded" | "failed" | "cancelled";
+export type CodexTaskState = "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
 
 export interface CodexTaskSnapshot {
   taskId: string;
@@ -41,6 +41,9 @@ interface RunningTask {
   child: ChildProcess;
   output: string;
   timer: NodeJS.Timeout | null;
+  killTimer: NodeJS.Timeout | null;
+  terminationStatus: "failed" | "cancelled" | null;
+  terminationError: string | null;
   finalized: boolean;
 }
 
@@ -148,6 +151,7 @@ export class CodexTaskManager {
         env: { ...process.env, C2C_REMOTE_TASK: "1" },
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
+        detached: process.platform !== "win32",
       });
     } catch (error) {
       throw new CodexTaskError(
@@ -170,6 +174,9 @@ export class CodexTaskManager {
       child,
       output: "",
       timer: null,
+      killTimer: null,
+      terminationStatus: null,
+      terminationError: null,
       finalized: false,
     };
     this.tasks.set(taskId, task);
@@ -188,10 +195,19 @@ export class CodexTaskManager {
     child.stderr?.on("data", append);
 
     child.once("error", (error) => {
-      this.finalize(task, "failed", null, error.message);
+      this.finalize(
+        task,
+        task.terminationStatus ?? "failed",
+        null,
+        task.terminationError ?? error.message
+      );
     });
     child.once("close", (code, signal) => {
       if (task.finalized) return;
+      if (task.terminationStatus) {
+        this.finalize(task, task.terminationStatus, code, task.terminationError);
+        return;
+      }
       if (signal) {
         this.finalize(task, "failed", code, `Codex exited after signal ${signal}.`);
         return;
@@ -206,8 +222,7 @@ export class CodexTaskManager {
 
     task.timer = setTimeout(() => {
       if (task.finalized) return;
-      child.kill("SIGTERM");
-      this.finalize(task, "failed", null, `Codex task timed out after ${timeoutSeconds} seconds.`);
+      this.requestTermination(task, "failed", `Codex task timed out after ${timeoutSeconds} seconds.`);
     }, timeoutSeconds * 1000);
     task.timer.unref?.();
 
@@ -226,18 +241,53 @@ export class CodexTaskManager {
   cancel(taskId: string): CodexTaskSnapshot {
     const task = this.tasks.get(taskId);
     if (!task) throw new CodexTaskError("TASK_NOT_FOUND", `No Codex task named ${taskId}.`);
-    if (task.finalized) return this.snapshot(task);
-    task.child.kill("SIGTERM");
-    this.finalize(task, "cancelled", null, "Cancelled by ChatGPT.");
+    if (task.finalized || task.terminationStatus) return this.snapshot(task);
+    this.requestTermination(task, "cancelled", "Cancelled by ChatGPT.");
     return this.snapshot(task);
   }
 
   shutdown(): void {
     for (const task of this.tasks.values()) {
-      if (!task.finalized) {
-        task.child.kill("SIGTERM");
-        this.finalize(task, "cancelled", null, "Bridge is shutting down.");
+      if (!task.finalized && !task.terminationStatus) {
+        this.requestTermination(task, "cancelled", "Bridge is shutting down.");
       }
+    }
+  }
+
+  private requestTermination(
+    task: RunningTask,
+    finalStatus: "failed" | "cancelled",
+    error: string
+  ): void {
+    if (task.finalized || task.terminationStatus) return;
+    task.terminationStatus = finalStatus;
+    task.terminationError = error;
+    task.snapshot.status = "cancelling";
+    task.snapshot.error = error;
+    if (task.timer) {
+      clearTimeout(task.timer);
+      task.timer = null;
+    }
+    this.signalTask(task, "SIGTERM");
+    task.killTimer = setTimeout(() => {
+      if (!task.finalized) this.signalTask(task, "SIGKILL");
+    }, 2000);
+    task.killTimer.unref?.();
+  }
+
+  private signalTask(task: RunningTask, signal: NodeJS.Signals): void {
+    if (process.platform !== "win32" && task.child.pid) {
+      try {
+        process.kill(-task.child.pid, signal);
+        return;
+      } catch {
+        // Fall back to signaling only the Codex process.
+      }
+    }
+    try {
+      task.child.kill(signal);
+    } catch {
+      // The close/error event will settle the task if the process already exited.
     }
   }
 
@@ -252,6 +302,10 @@ export class CodexTaskManager {
     if (task.timer) {
       clearTimeout(task.timer);
       task.timer = null;
+    }
+    if (task.killTimer) {
+      clearTimeout(task.killTimer);
+      task.killTimer = null;
     }
     task.snapshot.status = status;
     task.snapshot.exitCode = exitCode;
