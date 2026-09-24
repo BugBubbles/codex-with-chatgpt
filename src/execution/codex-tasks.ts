@@ -210,6 +210,7 @@ export class CodexTaskManager {
     }, timeoutSeconds * 1000);
     task.timer.unref?.();
 
+    child.stdin?.on("error", () => undefined);
     child.stdin?.end(taskPrompt(input.goal));
     this.logger.info(`Started remote Codex task ${taskId}`);
     return this.snapshot(task);
