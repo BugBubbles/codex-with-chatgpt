@@ -6,6 +6,7 @@ import { searchWorkspace } from "../workspace/search.js";
 import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
 import { executionRecordSchema, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import { listExecutionOutputs, readExecutionOutput } from "../execution/output.js";
+import { CodexTaskError, type CodexTaskManager } from "../execution/codex-tasks.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 
@@ -179,13 +180,25 @@ const executionOutputOutputSchema = {
   text: z.string().optional().describe("Sanitized command output returned by the read operation"),
 };
 
+const codexTaskOutputSchema = {
+  taskId: z.string(),
+  status: z.enum(["running", "succeeded", "failed", "cancelled"]),
+  submittedAt: z.string(),
+  startedAt: z.string(),
+  finishedAt: z.string().nullable(),
+  exitCode: z.number().int().nullable(),
+  outputId: z.number().int().positive().nullable(),
+  error: z.string().nullable(),
+};
+
 export interface McpContext {
   workspace: Workspace;
   logger: Logger;
+  taskManager: CodexTaskManager;
 }
 
 export function createMcpServer(ctx: McpContext): McpServer {
-  const { workspace } = ctx;
+  const { workspace, taskManager } = ctx;
   const server = new McpServer(
     { name: PRODUCT_NAME, version: VERSION },
     { capabilities: { tools: {} }, instructions: UNTRUSTED_NOTE }
@@ -468,6 +481,104 @@ export function createMcpServer(ctx: McpContext): McpServer {
         truncated: result.meta.truncated,
         text: result.text,
       });
+    }
+  );
+
+  server.registerTool(
+    "submit_codex_task",
+    {
+      title: "Submit Codex task",
+      description:
+        "Start one non-interactive Codex CLI task in this workspace. Codex receives a goal, may edit files inside the workspace and run local tools under the workspace-write sandbox. Network access is disabled, no arbitrary shell command is accepted, and only one remote task may run at a time.",
+      inputSchema: {
+        goal: z.string().min(1).max(12000).describe("Concrete implementation goal for Codex"),
+        model: z
+          .string()
+          .min(1)
+          .max(100)
+          .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/)
+          .optional()
+          .describe("Optional Codex model override"),
+        reasoning_effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
+        timeout_seconds: z.number().int().min(30).max(3600).default(1800),
+      },
+      outputSchema: codexTaskOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "execution.write");
+      if (denied) return denied;
+      try {
+        return okStructured(
+          taskManager.submit({
+            goal: args.goal,
+            model: args.model,
+            reasoningEffort: args.reasoning_effort,
+            timeoutSeconds: args.timeout_seconds,
+          })
+        );
+      } catch (error) {
+        if (error instanceof CodexTaskError) return fail(error.code, error.message);
+        return mapError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "codex_task_status",
+    {
+      title: "Codex task status",
+      description:
+        "Read the state of a remote Codex task. When it finishes, inspect outputId through execution_output and independently review git_diff.",
+      inputSchema: {
+        task_id: z.string().min(1),
+      },
+      outputSchema: codexTaskOutputSchema,
+      annotations: { readOnlyHint: true },
+    },
+    async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "execution.read");
+      if (denied) return denied;
+      try {
+        return okStructured(taskManager.get(args.task_id));
+      } catch (error) {
+        if (error instanceof CodexTaskError) return fail(error.code, error.message);
+        return mapError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "cancel_codex_task",
+    {
+      title: "Cancel Codex task",
+      description:
+        "Terminate a running remote Codex task. Partial workspace edits may remain and must be reviewed with git_diff.",
+      inputSchema: {
+        task_id: z.string().min(1),
+      },
+      outputSchema: codexTaskOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "execution.write");
+      if (denied) return denied;
+      try {
+        return okStructured(taskManager.cancel(args.task_id));
+      } catch (error) {
+        if (error instanceof CodexTaskError) return fail(error.code, error.message);
+        return mapError(error);
+      }
     }
   );
 
