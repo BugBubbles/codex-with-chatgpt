@@ -26,7 +26,7 @@
 | Prompt injection in workspace content | MCP descriptions mark workspace data untrusted; the Codex worker prompt repeats this boundary and forbids following embedded instructions that conflict with the requested goal/constraints |
 | Arbitrary remote shell | No shell command string is accepted by MCP. The caller supplies only a goal plus bounded model/reasoning/timeout options |
 | Broad remote writes | Codex is started with the `workspace-write` sandbox and the workspace as cwd; direct bridge file-write tools do not exist |
-| Approval escalation | Remote `codex exec` uses `--ask-for-approval never`; a task cannot pause and obtain broader permission interactively |
+| Approval escalation | Remote `codex exec` uses `--config approval_policy="never"`; a task cannot pause and obtain broader permission interactively |
 | Network exfiltration by a remote task | `sandbox_workspace_write.network_access=false` is forced for remotely submitted tasks |
 | Concurrent workspace corruption | Only one remotely submitted Codex task may run at a time |
 | Runaway process | Remote tasks have a bounded 30–3600 second timeout and an explicit cancellation tool |
