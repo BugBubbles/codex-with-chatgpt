@@ -106,7 +106,7 @@ C2C Bridge ----> local Codex CLI ----> workspace edits/tests
 ```
 
 Remote tasks use non-interactive `codex exec` with the `workspace-write`
-sandbox, approval mode `never`, an ephemeral Codex session, and network access
+sandbox, approval policy `never`, an ephemeral Codex session, and network access
 disabled. Only one remotely submitted task runs at a time. ChatGPT should review
 `git_diff` after completion rather than trusting the task result blindly.
 
