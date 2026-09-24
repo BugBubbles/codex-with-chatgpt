@@ -112,6 +112,11 @@ https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAf
 ```
 
 ## 日常使用方式
+> **WSL 注意：** Bridge 会在运行 `c2c start` 的同一操作系统环境中启动
+> `codex`。如果你的 Codex CLI 只安装在 WSL，请在该 WSL 环境中构建并启动 C2C
+>（正常的 CLI-only 流程就是如此）。Windows 原生 Bridge 不会自动跨到 WSL；必要时
+> 可用 `C2C_CODEX_BIN` 覆盖本地 Codex 可执行文件路径。
+
 
 重新授权 `execution.write` 后，推荐直接使用：
 
