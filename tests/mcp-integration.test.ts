@@ -372,14 +372,23 @@ describe("MCP tools over Streamable HTTP", () => {
         arguments: { goal: "C2C_TEST_SLOW" },
       })
     );
-    const cancelled = structuredJsonOf<{ taskId: string; status: string }>(
+    const cancelling = structuredJsonOf<{ taskId: string; status: string }>(
       await client.callTool({
         name: "cancel_codex_task",
         arguments: { task_id: submitted.taskId },
       })
     );
-    expect(cancelled.taskId).toBe(submitted.taskId);
-    expect(cancelled.status).toBe("cancelled");
+    expect(cancelling.taskId).toBe(submitted.taskId);
+    expect(["cancelling", "cancelled"]).toContain(cancelling.status);
+
+    let terminalStatus = cancelling.status;
+    for (let attempt = 0; attempt < 100 && terminalStatus === "cancelling"; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      terminalStatus = structuredJsonOf<{ status: string }>(
+        await client.callTool({ name: "codex_task_status", arguments: { task_id: submitted.taskId } })
+      ).status;
+    }
+    expect(terminalStatus).toBe("cancelled");
   });
 
   it("enforces scopes per tool", async () => {
