@@ -22,7 +22,9 @@ workspace code, ChatGPT may submit a concrete goal directly instead of returning
 6. If review finds a concrete issue, submit another bounded Codex task; otherwise report completion.
 7. Use `cancel_codex_task` if the user asks to stop or the task is clearly no longer appropriate.
 
-Only one remotely submitted task can run at a time. A completed task may have partial edits
+Only one remotely submitted task can run at a time. Cancellation may briefly report
+`cancelling` while the Codex process group is being terminated; no new task is admitted
+until that process has actually exited. A completed task may have partial edits
 even when its status is `failed` or `cancelled`, so review git state in every terminal case.
 
 ## States
