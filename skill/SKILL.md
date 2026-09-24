@@ -208,7 +208,7 @@ If ChatGPT receives `INSUFFICIENT_SCOPE` for `submit_codex_task`, re-authorize
 that workspace connector so it can request `execution.write`. Do not weaken or
 bypass OAuth scope checks.
 
-## Workflow: normal task
+## Workflow: manual C2C fallback task
 
 The user must keep one ChatGPT Web conversation associated with the current
 workspace. Codex CLI must never assume it can see that browser conversation.
