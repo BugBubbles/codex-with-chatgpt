@@ -116,12 +116,9 @@ describe("strict Python sandbox", () => {
         code: [
           "import ctypes",
           "import os",
-          "import resource",
           "libc = ctypes.CDLL(None)",
           "print('SECRET', os.environ.get('C2C_TEST_SECRET', 'missing'))",
           "print('NO_NEW_PRIVS', libc.prctl(39, 0, 0, 0, 0))",
-          "print('NOFILE', resource.getrlimit(resource.RLIMIT_NOFILE)[0])",
-          "print('CORE', resource.getrlimit(resource.RLIMIT_CORE)[0])",
         ].join("\n"),
         timeoutSeconds: 30,
       });
@@ -130,9 +127,13 @@ describe("strict Python sandbox", () => {
       expect(result.output).toContain("SECRET missing");
       expect(result.output).not.toContain("do-not-leak-to-python");
       expect(result.output).toContain("NO_NEW_PRIVS 1");
-      expect(result.output).toContain("CORE 0");
+      // Limits are attested by the bootstrap before user code starts. We do not
+      // call resource.getrlimit() from user code because prlimit64 is intentionally
+      // denied by seccomp to prevent modifying peer-process limits.
       expect(result.sandbox.limits.openFiles).toBeLessThanOrEqual(128);
       expect(result.sandbox.limits.core).toBe(0);
+      expect(result.sandbox.limits.addressSpace).toBeLessThanOrEqual(4 * 1024 ** 3);
+      expect(result.sandbox.limits.fileSize).toBeLessThanOrEqual(64 * 1024 ** 2);
     } finally {
       if (previous === undefined) delete process.env.C2C_TEST_SECRET;
       else process.env.C2C_TEST_SECRET = previous;
