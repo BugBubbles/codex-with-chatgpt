@@ -113,6 +113,36 @@ The default remains `"never"`. This setting is not accepted by the MCP task subm
 API; only the local operator can enable it. Restart the bridge after changing
 `.c2c.json`. `workspace_info.execution.approvalPolicy` reports the active value.
 
+### Linux bubblewrap rejects an app-server socket under `/docker`
+On some multi-user Linux hosts the root filesystem is mounted a second time at
+`/docker`. In that layout `/tmp` and `/docker/tmp` can resolve to the same
+inode through two host mount views. Codex's Linux sandbox can then reject an
+app-server socket created under the system temp directory with an error like:
+
+```text
+error building bubblewrap command: app-server socket directory has an unsupported host mount at /docker
+```
+
+C2C remote workers avoid this by giving spawned Codex CLI processes a dedicated
+Linux temp directory under `$XDG_CACHE_HOME/codex-with-chatgpt/codex-tmp` or,
+when `XDG_CACHE_HOME` is unset, `$HOME/.cache/codex-with-chatgpt/codex-tmp`.
+The bridge also removes inherited VS Code/Codex session identity variables from
+the worker environment so a remote task starts with the CLI sandbox context
+rather than a parent app-server session.
+
+To choose a different directory, set an absolute host path before starting the
+bridge:
+
+```bash
+export C2C_CODEX_TMPDIR=/home/me/.cache/codex-c2c-tmp
+c2c stop -w <workspace>
+c2c start -w <workspace> --tunnel
+```
+
+Prefer a directory on a filesystem that is not also exposed through the
+duplicate `/docker` mount. Do not globally unmount `/docker` on a shared host
+just to repair one C2C workspace.
+
 ### Local HTTP/SOCKS proxy
 C2C does not need a separate proxy field. The daemon inherits the environment from the
 shell that starts it, and spawned Codex processes inherit the daemon environment again.

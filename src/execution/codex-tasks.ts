@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Logger } from "../logger/index.js";
-import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 import {
   DEFAULT_POLL_INTERVAL_SECONDS,
   type CodexApprovalPolicy,
@@ -75,6 +75,61 @@ interface PersistedCodexSession {
 const DEFAULT_TIMEOUT_SECONDS = 30 * 60;
 const MAX_FINISHED_TASKS = 20;
 const DEFAULT_MAX_CAPTURED_CHARS = 1_000_000;
+
+const CODEX_CHILD_ENV_KEYS_TO_DROP = [
+  "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+  "CODEX_SESSION_ID",
+  "CODEX_THREAD_ID",
+  "CODEX_PERMISSION_PROFILE",
+  "CODEX_SANDBOX_NETWORK_DISABLED",
+  "VSCODE_IPC_HOOK_CLI",
+] as const;
+
+function linuxCodexTempDir(baseEnv: NodeJS.ProcessEnv): string {
+  const override = baseEnv.C2C_CODEX_TMPDIR?.trim();
+  if (override) return ensureDir(path.resolve(override));
+
+  const xdgCacheHome = baseEnv.XDG_CACHE_HOME?.trim();
+  if (xdgCacheHome) {
+    return ensureDir(path.join(path.resolve(xdgCacheHome), "codex-with-chatgpt", "codex-tmp"));
+  }
+
+  const home = baseEnv.HOME?.trim();
+  if (home) {
+    return ensureDir(path.join(path.resolve(home), ".cache", "codex-with-chatgpt", "codex-tmp"));
+  }
+
+  // HOME should exist on normal Linux installs, but the state directory is a
+  // safer fallback than the system temp directory when the host exposes /tmp
+  // through a second bind-mount alias such as /docker/tmp.
+  return ensureDir(path.join(getStateDir(), "codex-tmp"));
+}
+
+export function buildCodexChildEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv, C2C_REMOTE_TASK: "1" };
+
+  // Remote task workers must behave like independent Codex CLI processes.
+  // Inheriting VS Code/app-server session identity can make Codex reuse the
+  // parent's IPC/sandbox context instead of constructing a clean CLI sandbox.
+  for (const key of CODEX_CHILD_ENV_KEYS_TO_DROP) delete env[key];
+
+  if (platform === "linux") {
+    // Some multi-user hosts expose the root filesystem again at /docker, so
+    // /tmp and /docker/tmp resolve to the same inode through two mount views.
+    // Codex/bubblewrap rejects app-server sockets created under that duplicate
+    // host mount. Put Codex's temp/socket state on the user's home filesystem
+    // instead. C2C_CODEX_TMPDIR remains an explicit operator override.
+    const tempDir = linuxCodexTempDir(baseEnv);
+    env.TMPDIR = tempDir;
+    env.TMP = tempDir;
+    env.TEMP = tempDir;
+  }
+
+  return env;
+}
 
 function sessionStateFile(workspaceId: string): string {
   return path.join(getStateDir(), "codex-sessions", `${workspaceId}.json`);
@@ -229,7 +284,7 @@ export class CodexTaskManager {
     try {
       child = spawn(this.command, args, {
         cwd: this.workspace.root,
-        env: { ...process.env, C2C_REMOTE_TASK: "1" },
+        env: buildCodexChildEnv(),
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
         detached: process.platform !== "win32",
