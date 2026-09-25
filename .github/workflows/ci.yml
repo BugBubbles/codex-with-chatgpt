@@ -6,11 +6,11 @@ on:
       - main
       - cli-only
       - python
-      - python
   push:
     branches:
       - main
       - cli-only
+      - python
 
 permissions:
   contents: read
