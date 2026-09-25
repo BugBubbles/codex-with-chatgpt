@@ -682,7 +682,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "execution.read");
       if (denied) return denied;
       try {
-        return okStructured(taskManager.get(args.task_id));
+        return okStructured(taskManager.get(args.task_id, { enforcePollInterval: true }));
       } catch (error) {
         if (error instanceof CodexTaskError) return fail(error.code, error.message);
         return mapError(error);
