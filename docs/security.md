@@ -87,11 +87,12 @@ The bridge captures `thread.started.thread_id` immediately and stores it under t
 C2C state directory. Later remote turns resume that exact thread:
 
 ```text
-codex exec resume <thread_id> --json \
+codex exec --json \
   --config approval_policy="never" \
   --skip-git-repo-check \
   --config sandbox_mode="workspace-write" \
   --config sandbox_workspace_write.network_access=false \
+  resume <thread_id> \
   -
 ```
 
