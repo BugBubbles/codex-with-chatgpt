@@ -187,6 +187,16 @@ const pythonWriteFileOutputSchema = {
   sha256: z.string(),
 };
 
+const pythonSandboxOutputSchema = z.object({
+  enforced: z.literal(true),
+  backend: z.literal("landlock+seccomp"),
+  landlockAbi: z.number().int().min(4),
+  noNewPrivs: z.literal(true),
+  network: z.literal("blocked"),
+  externalExec: z.literal("blocked"),
+  limits: z.record(z.number().nonnegative()),
+});
+
 const pythonExecuteOutputSchema = {
   executionId: z.string(),
   mode: z.enum(["inline", "file"]),
@@ -196,6 +206,7 @@ const pythonExecuteOutputSchema = {
   outputId: z.number().int().positive(),
   outputAvailable: z.boolean(),
   output: z.string().nullable(),
+  sandbox: pythonSandboxOutputSchema,
   changedFiles: z.array(z.string()),
 };
 
@@ -525,19 +536,19 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Execute Python",
       description:
-        "Execute Python directly on the local bridge, with the workspace as cwd. Supply exactly one of inline code or a workspace-relative .py file path. This does not invoke Codex and is not an OS sandbox: Python runs with the bridge process user's local permissions. The bridge minimizes inherited environment variables, enforces a timeout, records git-visible changes, and sanitizes returned output.",
+        "Execute Python inside a strict local Linux x86_64 sandbox with the workspace as cwd. Supply exactly one of inline code or a workspace-relative .py file path. The sandbox is fail-closed and requires Landlock ABI 4+, seccomp and no_new_privs; it blocks network access and external program execution, limits filesystem access to the workspace/private temp plus read-only Python runtime paths, scrubs the environment, applies resource limits, records git-visible changes, and sanitizes returned output.",
       inputSchema: {
         code: z.string().min(1).max(200_000).optional().describe("Inline Python source. Mutually exclusive with path."),
         path: z.string().min(1).max(2000).optional().describe("Workspace-relative .py file. Mutually exclusive with code."),
         args: z.array(z.string().max(2000)).max(50).default([]).describe("Arguments exposed through sys.argv"),
-        timeout_seconds: z.number().int().min(1).max(3600).default(120),
+        timeout_seconds: z.number().int().min(1).max(300).default(120),
       },
       outputSchema: pythonExecuteOutputSchema,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async (args, extra) => {
