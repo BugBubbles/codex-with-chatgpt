@@ -55,9 +55,12 @@ export interface ListDirectoryResult {
   hasMore: boolean;
 }
 
+export const DEFAULT_POLL_INTERVAL_SECONDS = 180;
+
 export interface ProjectConfig {
   name?: string;
   maxIterations?: number;
+  pollIntervalSeconds?: number;
 }
 
 function parseProjectConfig(value: unknown): ProjectConfig {
@@ -65,7 +68,12 @@ function parseProjectConfig(value: unknown): ProjectConfig {
   const raw = value as Record<string, unknown>;
   const config: ProjectConfig = {};
   if (typeof raw.name === "string") config.name = raw.name;
-  if (typeof raw.maxIterations === "number") config.maxIterations = raw.maxIterations;
+  if (typeof raw.maxIterations === "number" && Number.isFinite(raw.maxIterations)) {
+    config.maxIterations = raw.maxIterations;
+  }
+  if (typeof raw.pollIntervalSeconds === "number" && Number.isFinite(raw.pollIntervalSeconds)) {
+    config.pollIntervalSeconds = Math.max(30, Math.min(3600, Math.floor(raw.pollIntervalSeconds)));
+  }
   return config;
 }
 
