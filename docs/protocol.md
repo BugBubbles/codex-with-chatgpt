@@ -5,27 +5,89 @@ Preferred control plane: scoped MCP task dispatch (`submit_codex_task` / `codex_
 Data plane: MCP read tools for files, diffs, search results and sanitized execution output.
 Manual browser handoff remains the fallback protocol for old/read-only connectors.
 
-Never expose raw shell commands through the protocol. Direct mode carries a goal; manual
-control messages carry state, never file bodies, diffs or logs.
+Never expose raw shell commands through the protocol. Direct mode carries a structured,
+web-authored execution brief; manual control messages carry state, never file bodies,
+diffs or logs.
 
 ## Direct execution mode
 
 When `submit_codex_task` is available and the user asks ChatGPT to implement or modify
-workspace code, ChatGPT may submit a concrete goal directly instead of returning a manual
-`STATE: PLAN` message.
+workspace code, direct mode is a **planner → executor → reviewer** pipeline:
 
-1. Inspect the minimum necessary code through the read tools.
-2. Call `submit_codex_task` with a bounded implementation goal. Do not send a shell command.
-3. Poll `codex_task_status` until the state is terminal.
-4. If an `outputId` is present, read it through `execution_output` when allowed.
-5. Independently inspect `git_diff` and relevant files.
-6. If review finds a concrete issue, submit another bounded Codex task; otherwise report completion.
-7. Use `cancel_codex_task` if the user asks to stop or the task is clearly no longer appropriate.
+- **ChatGPT Web = planner/reviewer.** It owns deep reasoning, log/data analysis,
+  diagnosis, architecture decisions, implementation planning and final review.
+- **Local Codex CLI = executor.** It primarily follows the web-authored execution
+  document, edits files, runs local commands and resolves ordinary implementation
+  failures. Assume the local model may be materially weaker than the web model.
+- **C2C Bridge = bounded control plane.** It preserves workspace/sandbox/auth
+  boundaries and keeps the executor on one persistent Codex thread.
+
+### Required dispatch procedure
+
+1. Inspect enough relevant code, configuration, git state, diffs and released
+   execution output to understand the user's **complete** goal. "Minimum necessary"
+   does not mean stopping at the first plausible symptom.
+2. Finish the heavy analysis on ChatGPT Web before dispatch. Do not send a vague
+   request such as "investigate", "figure out the architecture", or "fix this file"
+   when the web side can determine the required plan itself.
+3. Construct one `execution_brief` with all required fields:
+   - title;
+   - complete objective;
+   - verified current state/evidence;
+   - web-side diagnosis and reasoning;
+   - ordered implementation steps, each with exact instructions, likely files,
+     local commands and a concrete verification condition;
+   - validation plan;
+   - success criteria;
+   - constraints;
+   - known risks/regression checks.
+4. Treat the brief as an **authoritative formatted implementation document for a
+   lower-capability executor**. Be explicit about what to change and how. Do not
+   rely on local Codex to rediscover the root cause, choose the architecture, or
+   perform the main planning.
+5. Dispatch the entire coherent implementation batch with one
+   `submit_codex_task` call. Do not split one user goal into separate tasks by
+   file, symptom, or plan step merely to make each task small.
+6. The first task creates a saved Codex thread; subsequent tasks resume the exact
+   same `thread_id`. A resume that reports a different thread id is a continuity
+   failure and must not be treated as a successful continuation.
+7. While the task is running, respect `nextPollAt` /
+   `pollIntervalSeconds`. The default is 180 seconds (3 minutes), configurable
+   through `.c2c.json`. Do not busy-poll.
+8. When terminal, read `execution_output` if released, then independently inspect
+   `git_diff` and relevant files. Review all success criteria together.
+9. Submit another Codex task only for a concrete residual issue that was genuinely
+   unforeseen, blocked, or could not reasonably be included in the prior brief.
+   The corrective task should again be one coherent execution brief.
+10. Use `cancel_codex_task` if the user asks to stop or the task is clearly no
+    longer appropriate.
 
 Only one remotely submitted task can run at a time. Cancellation may briefly report
 `cancelling` while the Codex process group is being terminated; no new task is admitted
 until that process has actually exited. A completed task may have partial edits
 even when its status is `failed` or `cancelled`, so review git state in every terminal case.
+
+### Persistent Codex thread
+
+Direct-mode remote execution intentionally does **not** use `--ephemeral`.
+
+- First dispatch: `codex exec ...`; capture and persist `thread.started.thread_id`.
+- Later dispatches: `codex exec resume <thread_id> ...`.
+- Resume turns reapply the workspace-write sandbox through config and force network
+  access off again.
+- If the expected thread id and observed `thread.started.thread_id` differ, the
+  bridge clears the stale saved id, fails the task and requires review before a
+  fresh dispatch. It never silently accepts context loss.
+
+Per-workspace polling configuration:
+
+```json
+{
+  "pollIntervalSeconds": 180
+}
+```
+
+Values are clamped to 30–3600 seconds. Omitted value: 180 seconds.
 
 ## States
 
@@ -240,28 +302,35 @@ You have access to the current local workspace through the
 Rules:
 
 1. Do not ask Codex to paste files that are available through MCP.
-2. Inspect only the files needed for the task.
-3. Use MCP to inspect current code, git status and diff.
-4. Produce concise executable plans.
-5. If submit_codex_task is available and execution is authorized, prefer direct task dispatch;
-   otherwise use the manual C2C PLAN flow below.
-6. After any Codex task completes or Codex reports EXECUTED, independently inspect the diff.
-   If execution_output lists a readable item for this iteration, list
-   then read it. If status is restricted, ignore the body and review
-   from git.
-7. Do not assume an implementation succeeded just because Codex says so.
-8. Continue until the implementation satisfies the success criteria.
-9. Avoid unnecessary rewrites.
-10. Return C2C structured control messages only when using the manual fallback flow.
-11. Be substantive. PLAN and review replies must carry enough signal for
-    Codex to act on: rationale, per-file natural-language suggestions
-    (which file, what to change and why), risks worth checking, and test
-    advice. Never reply with a bare one-liner. Substance over length —
-    but do not generate 40-step epics either.
-12. If you receive a HANDOFF message, this conversation continues an
+2. Use MCP to inspect enough relevant code, git state, diffs and released
+   execution output to understand the whole user goal before dispatching.
+3. You own deep reasoning: root-cause analysis, log/data analysis,
+   architecture decisions, implementation planning and review belong on
+   ChatGPT Web. Do not delegate those tasks to the local Codex worker.
+4. Prefer one coherent execution batch per user goal. Do not split work by
+   file, symptom, or implementation step merely to keep tasks small.
+5. Before calling submit_codex_task, produce its complete structured
+   execution_brief: objective, verified current state, diagnosis, exact
+   ordered implementation steps, files, local commands, per-step
+   verification, validation plan, success criteria, constraints and risks.
+   Write it so a lower-capability executor can implement without inventing
+   the architecture or plan.
+6. If submit_codex_task is available and execution is authorized, dispatch
+   that complete brief directly; otherwise use the manual C2C PLAN flow.
+7. After submission, respect nextPollAt/pollIntervalSeconds and do not
+   busy-poll codex_task_status. Default cadence is 180 seconds.
+8. After any Codex task completes or Codex reports EXECUTED, independently
+   inspect execution_output when readable, git_diff and relevant files.
+9. Do not assume an implementation succeeded just because Codex says so.
+10. Submit a corrective Codex task only for a concrete residual issue that
+    was unforeseen or blocked; again use one complete execution brief.
+11. Continue until the implementation satisfies the full success criteria.
+12. Avoid unnecessary rewrites.
+13. Return C2C structured control messages only when using the manual fallback flow.
+14. If you receive a HANDOFF message, this conversation continues an
     existing task. Trust the handoff brief for history, re-read any code
     you need through MCP, and resume from NEXT_EXPECTED_STEP.
-13. If this chat sits in a ChatGPT Project, use only the connector named
+15. If this chat sits in a ChatGPT Project, use only the connector named
     in that Project's instructions. Do not use another workspace's connector.
 ```
 
@@ -299,6 +368,11 @@ When facts conflict, trust this order:
 This Project's memory is only for this workspace. On HANDOFF, trust the
 brief, re-read code through the connector, and resume at NEXT_EXPECTED_STEP.
 
-Be substantive: why, which file, what to test. No empty one-liners and
-no 40-step epics. Use C2C control messages.
+Own the planning burden. Before direct execution, inspect the relevant
+workspace evidence and prepare one detailed implementation brief for the
+entire coherent goal. Specify why, exact files, exact implementation steps,
+local commands, per-step verification, validation, success criteria and
+risks so a lower-capability local Codex can execute rather than plan.
+Respect nextPollAt/pollIntervalSeconds (default 180 seconds) instead of
+busy-polling. Use C2C control messages only for the manual fallback flow.
 ```
