@@ -8,8 +8,9 @@ ChatGPT desktop app.
 
 The local bridge, OAuth, Cloudflare tunnel and workspace isolation remain intact.
 This branch now adds a narrow execution control plane on top of the existing
-read-oriented MCP data plane: ChatGPT can submit a goal to the local Codex CLI,
-query its status and cancel it without receiving a raw shell primitive.
+read-oriented MCP data plane: ChatGPT Web performs the deep analysis, submits a
+structured implementation brief to the local Codex CLI, queries its status and
+cancels it without receiving a raw shell primitive.
 Manual C2C message handoff remains available as a fallback.
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md).
@@ -103,18 +104,40 @@ Preferred direct workflow after authorizing `execution.write`:
 
 ```text
 ChatGPT Web
-    |  submit_codex_task(goal)
+    |  deep analysis + structured execution brief
+    |  submit_codex_task(execution_brief)
     v
-C2C Bridge ----> local Codex CLI ----> workspace edits/tests
-    ^                                      |
-    | codex_task_status / execution_output |
-    +--------------- git_diff -------------+
+C2C Bridge ----> persistent local Codex CLI thread ----> workspace edits/tests
+    ^                                                       |
+    | codex_task_status / execution_output                  |
+    +----------------------- git_diff -----------------------+
 ```
 
-Remote tasks use non-interactive `codex exec` with the `workspace-write`
-sandbox, approval policy `never`, an ephemeral Codex session, and network access
-disabled. Only one remotely submitted task runs at a time. ChatGPT should review
-`git_diff` after completion rather than trusting the task result blindly.
+ChatGPT Web is the planning/review layer: it should inspect the relevant code,
+diffs and released logs, perform root-cause/architecture reasoning, and prepare
+one detailed implementation document for the entire coherent user goal. Local
+Codex is treated primarily as an executor and should not be expected to redo the
+main planning.
+
+The first remote task uses non-interactive `codex exec` and stores the returned
+`thread_id`. Later tasks use `codex exec resume <thread_id>`, so the same
+Codex conversation is reused instead of starting an ephemeral session every
+time. Every turn keeps the workspace-write sandbox, approval policy `never`,
+and network access disabled. Only one remote task runs at a time.
+
+Status polling is intentionally slow. The default cadence is 180 seconds
+(3 minutes), and task results expose `nextPollAt`. Configure it in the
+workspace's `.c2c.json`:
+
+```json
+{
+  "pollIntervalSeconds": 180
+}
+```
+
+Values are clamped to 30–3600 seconds. After completion ChatGPT independently
+reviews `execution_output`, `git_diff` and relevant files before deciding
+whether the goal is done or a genuinely necessary corrective batch is required.
 
 The original manual `[C2C]` INIT/PLAN/EXECUTED flow remains supported as a
 fallback for connectors that have not been re-authorized with `execution.write`.
@@ -122,9 +145,9 @@ fallback for connectors that have not been re-authorized with `execution.write`.
 ## Why CLI-only is different
 
 The upstream Skill automates ChatGPT Web using an in-app browser. This fork does
-not require that browser surface. The bridge can now dispatch bounded goals to
-`codex exec` directly, while manual browser handoff remains available for setup,
-recovery and users who prefer not to grant execution scope.
+not require that browser surface. The bridge can now dispatch comprehensive, web-planned implementation briefs to
+a persistent `codex exec` thread directly, while manual browser handoff remains
+available for setup, recovery and users who prefer not to grant execution scope.
 
 ## CLI commands
 
@@ -157,8 +180,11 @@ Execution is explicit and scoped rather than a generic remote shell:
 - Remote execution requires the separate `execution.write` OAuth scope.
 - The MCP server exposes task submission/status/cancellation, not arbitrary shell,
   direct file-write, package-install or git-commit primitives.
-- Each task runs Codex with `workspace-write`, no approval escalation and network
-  access disabled; Codex is also instructed not to commit, push or expose secrets.
+- Initial and resumed tasks run Codex with `workspace-write`, no approval
+  escalation and network access disabled; Codex is also instructed not to commit,
+  push or expose secrets.
+- One persistent Codex `thread_id` is stored per workspace; resume thread drift
+  fails closed rather than silently losing context.
 - Only one remote task may run at a time and tasks have a bounded timeout.
 - Captured Codex output still passes through the existing local sanitizer before
   `execution_output` can return it.
