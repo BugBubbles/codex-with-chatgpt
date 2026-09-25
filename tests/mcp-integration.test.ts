@@ -449,11 +449,21 @@ describe("MCP tools over Streamable HTTP", () => {
       })
     );
     expect(submitted.threadId).toBe("c2c-test-thread");
-    const invocations = fs
-      .readFileSync(path.join(stateDir, "codex-invocations.jsonl"), "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { isResume: boolean });
+    let invocations: { isResume: boolean }[] = [];
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const invocationFile = path.join(stateDir, "codex-invocations.jsonl");
+      if (fs.existsSync(invocationFile)) {
+        invocations = fs
+          .readFileSync(invocationFile, "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { isResume: boolean });
+      }
+      if (invocations.length >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(invocations.length).toBeGreaterThanOrEqual(2);
     expect(invocations.at(-1)?.isResume).toBe(true);
 
     const tooEarly = await client.callTool({
