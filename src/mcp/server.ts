@@ -66,6 +66,11 @@ const workspaceInfoOutputSchema = {
   packageManager: z.string().nullable(),
   scripts: z.record(z.string()),
   git: gitIdentityOutputSchema,
+  execution: z.object({
+    persistentSession: z.literal(true),
+    pollIntervalSeconds: z.number().int().min(30).max(3600),
+    sessionActive: z.boolean(),
+  }),
 };
 
 const directoryEntryOutputSchema = z.object({
@@ -189,7 +194,136 @@ const codexTaskOutputSchema = {
   exitCode: z.number().int().nullable(),
   outputId: z.number().int().positive().nullable(),
   error: z.string().nullable(),
+  threadId: z.string().nullable(),
+  pollIntervalSeconds: z.number().int().min(30).max(3600),
+  nextPollAt: z.string().nullable(),
 };
+
+const executionStepSchema = z.object({
+  title: z.string().min(3).max(200).describe("Specific implementation step title"),
+  instructions: z
+    .string()
+    .min(80)
+    .max(6000)
+    .describe("Detailed, implementation-level instructions: what to change, how to change it, and why"),
+  files: z
+    .array(z.string().min(1))
+    .max(30)
+    .default([])
+    .describe("Workspace-relative files likely involved in this step"),
+  commands: z
+    .array(z.string().min(1))
+    .max(20)
+    .default([])
+    .describe("Local commands Codex should run for this step when applicable; no network-dependent commands"),
+  verification: z
+    .string()
+    .min(20)
+    .max(3000)
+    .describe("Concrete evidence that proves this step is correctly implemented"),
+});
+
+const executionBriefSchema = z.object({
+  title: z.string().min(5).max(200),
+  objective: z
+    .string()
+    .min(40)
+    .max(4000)
+    .describe("Complete end state for the user's request, not a single subtask"),
+  current_state: z
+    .string()
+    .min(40)
+    .max(6000)
+    .describe("Verified current behavior, relevant code state, logs, errors, and constraints discovered by ChatGPT Web"),
+  diagnosis: z
+    .string()
+    .min(80)
+    .max(8000)
+    .describe("ChatGPT Web's root-cause analysis and architectural reasoning. Do not delegate this reasoning to local Codex"),
+  implementation_steps: z
+    .array(executionStepSchema)
+    .min(1)
+    .max(30)
+    .describe("Ordered implementation steps for one coherent execution batch; do not split them into separate Codex tasks"),
+  validation_plan: z
+    .array(z.string().min(10).max(2000))
+    .min(1)
+    .max(20)
+    .describe("Build, typecheck, lint, test, or runtime validation that Codex must perform"),
+  success_criteria: z
+    .array(z.string().min(10).max(2000))
+    .min(1)
+    .max(20)
+    .describe("Observable conditions that must all be true before this batch is considered complete"),
+  constraints: z
+    .array(z.string().min(5).max(2000))
+    .min(1)
+    .max(20)
+    .describe("Requirements Codex must preserve while implementing"),
+  risks: z
+    .array(z.string().min(5).max(2000))
+    .max(20)
+    .default([])
+    .describe("Known risks, edge cases, or regression areas that Codex should check while executing"),
+});
+
+function renderExecutionBrief(brief: z.infer<typeof executionBriefSchema>): string {
+  const steps = brief.implementation_steps
+    .map((step, index) => {
+      const files = step.files.length > 0 ? step.files.map((file) => `- ${file}`).join("\n") : "- None identified in advance; inspect only as required.";
+      const commands =
+        step.commands.length > 0
+          ? step.commands.map((command) => `- \`${command}\``).join("\n")
+          : "- No explicit command for this step.";
+      return [
+        `## Step ${index + 1}: ${step.title}`,
+        "",
+        "### Implementation instructions",
+        step.instructions,
+        "",
+        "### Files",
+        files,
+        "",
+        "### Commands",
+        commands,
+        "",
+        "### Step verification",
+        step.verification,
+      ].join("\n");
+    })
+    .join("\n\n");
+
+  const bulletList = (items: string[], empty = "- None identified.") =>
+    items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : empty;
+
+  return [
+    `# ${brief.title}`,
+    "",
+    "## Objective",
+    brief.objective,
+    "",
+    "## Verified current state",
+    brief.current_state,
+    "",
+    "## Web-side diagnosis and reasoning",
+    brief.diagnosis,
+    "",
+    "## Implementation plan",
+    steps,
+    "",
+    "## Validation plan",
+    bulletList(brief.validation_plan),
+    "",
+    "## Success criteria",
+    bulletList(brief.success_criteria),
+    "",
+    "## Constraints",
+    bulletList(brief.constraints),
+    "",
+    "## Risks and regression checks",
+    bulletList(brief.risks),
+  ].join("\n");
+}
 
 export interface McpContext {
   workspace: Workspace;
@@ -232,6 +366,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
             commit: git.commit,
             dirty: git.dirty,
           },
+          execution: taskManager.executionPolicy(),
         });
       } catch (error) {
         return mapError(error);
@@ -489,9 +624,11 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Submit Codex task",
       description:
-        "Start one non-interactive Codex CLI task in this workspace. Codex receives a goal, may edit files inside the workspace and run local tools under the workspace-write sandbox. Network access is disabled, no arbitrary shell command is accepted, and only one remote task may run at a time.",
+        "Dispatch ONE coherent implementation batch to the local Codex CLI. Before calling this tool, ChatGPT Web must do the heavy reasoning itself: inspect all relevant code/diffs/logs, diagnose the root cause, make the implementation decisions, and write a complete execution brief detailed enough for a lower-capability executor. Do NOT split one user goal into separate tasks by file, symptom, or implementation step. Local Codex is primarily an executor: it follows the brief, edits files, runs local commands, and fixes ordinary implementation/test failures. The same persistent Codex thread is resumed across batches. After submission, do not poll codex_task_status before nextPollAt (default cadence 180 seconds) unless the user asks to cancel or there is a specific reason to interrupt.",
       inputSchema: {
-        goal: z.string().min(1).max(12000).describe("Concrete implementation goal for Codex"),
+        execution_brief: executionBriefSchema.describe(
+          "Authoritative, highly detailed execution document produced by ChatGPT Web after completing diagnosis and planning"
+        ),
         model: z
           .string()
           .min(1)
@@ -500,7 +637,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
           .optional()
           .describe("Optional Codex model override"),
         reasoning_effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
-        timeout_seconds: z.number().int().min(30).max(3600).default(1800),
+        timeout_seconds: z.number().int().min(30).max(3600).default(3600),
       },
       outputSchema: codexTaskOutputSchema,
       annotations: {
@@ -516,7 +653,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       try {
         return okStructured(
           taskManager.submit({
-            goal: args.goal,
+            executionBrief: renderExecutionBrief(args.execution_brief),
             model: args.model,
             reasoningEffort: args.reasoning_effort,
             timeoutSeconds: args.timeout_seconds,
@@ -534,7 +671,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Codex task status",
       description:
-        "Read the state of a remote Codex task. When it finishes, inspect outputId through execution_output and independently review git_diff.",
+        "Read the state of a remote Codex task. Respect nextPollAt and pollIntervalSeconds: while a task is running, do not call this tool more frequently than the configured cadence (default 180 seconds). Once terminal, inspect outputId through execution_output, then independently review git_diff and relevant files. Submit a corrective Codex batch only for concrete residual issues that could not reasonably have been handled in the original execution brief.",
       inputSchema: {
         task_id: z.string().min(1),
       },
@@ -545,7 +682,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "execution.read");
       if (denied) return denied;
       try {
-        return okStructured(taskManager.get(args.task_id));
+        return okStructured(taskManager.get(args.task_id, { enforcePollInterval: true }));
       } catch (error) {
         if (error instanceof CodexTaskError) return fail(error.code, error.message);
         return mapError(error);

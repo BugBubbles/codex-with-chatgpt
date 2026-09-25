@@ -19,7 +19,7 @@
              │  Admin API (local)  │
              └──────┬────────┬─────┘
                     │        │
-          read-only │        │ bounded task dispatch
+          read-only │        │ coherent brief dispatch
                     ▼        ▼
              ┌───────────┐  ┌──────────────┐
              │ Workspace │◀─│ Codex CLI    │
@@ -33,8 +33,11 @@
 - **MCP data plane**: ChatGPT reads files, diffs, search results and sanitized execution output.
 - **MCP control plane**: a separately authorized `execution.write` scope permits only
   `submit_codex_task`, `codex_task_status` and `cancel_codex_task`.
-- **Codex remains the execution harness**: submitted goals run through non-interactive
-  `codex exec`, not bridge-implemented editing primitives.
+- **ChatGPT Web remains the planning brain**: root-cause analysis, log/data analysis,
+  architecture decisions and the detailed implementation plan are completed before dispatch.
+- **Codex remains the execution harness**: structured implementation briefs run through
+  non-interactive `codex exec`, not bridge-implemented editing primitives. A persistent
+  Codex thread is reused across batches.
 - **Manual browser handoff remains a fallback** for old connectors and recovery.
 - **Workspace is the authorization boundary**: one bridge = one workspace = one token audience.
 
@@ -47,7 +50,7 @@
 | `auth/` | OAuth 2.1 authorization server, PKCE, dynamic registration, refresh rotation and per-tool scopes |
 | `pairing/` | Pairing-code lifecycle: CSPRNG generation, TTL, attempt limits and one-time use |
 | `workspace/` | Canonical-path containment, sensitive-file policy, paginated read/list, search and git status/diff |
-| `execution/codex-tasks.ts` | One-at-a-time local `codex exec` task dispatch, timeout, cancellation and result recording |
+| `execution/codex-tasks.ts` | One-at-a-time local `codex exec` dispatch, persistent thread/resume state, polling metadata, timeout, cancellation and result recording |
 | `execution/` | Execution records plus sanitized command/Codex output |
 | `tunnel/` | Cloudflare Quick/Named tunnel implementations |
 | `process/` | Bridge daemon spawn/reuse, health probing and shutdown |
@@ -59,17 +62,27 @@
 **Read call**: ChatGPT → tunnel (HTTPS) → bridge `/mcp` → bearer middleware →
 tool scope check → workspace layer → JSON result.
 
-**Task submit**: ChatGPT → `submit_codex_task` → `execution.write` scope check →
-CodexTaskManager → local `codex exec --sandbox workspace-write --ask-for-approval never`
-with the workspace as cwd. Network access is disabled for the spawned task. The prompt is
-sent over stdin; the bridge never accepts a caller-supplied shell command.
+**Task submit**: ChatGPT first inspects the relevant workspace evidence and produces one
+structured execution brief for the complete coherent goal. The call then flows through
+`submit_codex_task` → `execution.write` scope check → CodexTaskManager.
+
+For the first batch, CodexTaskManager starts local `codex exec` with the
+`workspace-write` sandbox, approval policy `never`, the workspace as cwd and network
+access disabled. It captures `thread.started.thread_id` and persists it per workspace.
+Later batches use `codex exec resume <thread_id>` and explicitly reapply
+`sandbox_mode="workspace-write"` plus network denial. The formatted implementation brief
+is sent over stdin; the bridge never accepts a caller-supplied shell command.
+
+**Task progress**: task snapshots expose `pollIntervalSeconds` and `nextPollAt`.
+The default interval is 180 seconds and can be configured in `.c2c.json` (30–3600
+seconds). The web planner should not busy-poll while the local executor is working.
 
 **Task completion**: Codex stdout/stderr → existing local sanitizer → execution output
 record; git status is recorded as execution metadata. ChatGPT then independently checks
-`codex_task_status`, `execution_output` and `git_diff`.
+`execution_output`, `git_diff` and relevant files against the complete success criteria.
 
-Only one remotely submitted task may run at a time. Remote tasks default to a 30-minute
-timeout and MCP callers may request 30–3600 seconds.
+Only one remotely submitted task may run at a time. The MCP submission default is a
+60-minute timeout and callers may request 30–3600 seconds.
 
 ## Authorization
 

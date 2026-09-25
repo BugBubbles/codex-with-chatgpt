@@ -1,9 +1,9 @@
 ---
 name: codex-with-chatgpt
 description: >
-  CLI-only Codex + ChatGPT collaboration. ChatGPT Web can plan/review and,
-  when execution.write is authorized, dispatch bounded tasks to local Codex CLI.
-  No Codex desktop app or in-app browser is required.
+  CLI-only Codex + ChatGPT collaboration. ChatGPT Web performs deep analysis,
+  produces comprehensive execution briefs, and dispatches coherent implementation
+  batches to a persistent local Codex CLI thread. No desktop app is required.
 ---
 
 # Codex with ChatGPT — CLI-only
@@ -17,8 +17,9 @@ browser capability.
 
 The C2C Bridge exposes read-oriented workspace tools plus an optional scoped
 execution control plane. Codex CLI still owns edits, shell commands, git and
-tests; ChatGPT may only submit/cancel a Codex goal when the connector has the
-separate `execution.write` OAuth scope. No generic remote shell is exposed.
+tests; ChatGPT may only submit/cancel a structured Codex execution brief when
+the connector has the separate `execution.write` OAuth scope. No generic
+remote shell is exposed.
 
 ## CLI-only contract
 
@@ -189,20 +190,60 @@ Ready.
 
 ## Workflow: ChatGPT-originated direct execution
 
-When the user starts the coding task from ChatGPT Web and the connector exposes
-`submit_codex_task`, the bridge itself launches non-interactive Codex CLI. The
-interactive Codex session does not need to receive PLAN text manually.
+When the user starts a coding task from ChatGPT Web and the connector exposes
+`submit_codex_task`, use the web model as the planner/reviewer and local Codex
+as the execution worker.
 
-Direct mode contract:
+### Direct-mode contract
 
-- ChatGPT submits a concrete goal, not an arbitrary shell command.
-- The bridge uses `codex exec` with `workspace-write`, approval policy `never`,
-  an ephemeral session and network access disabled.
-- Only one remote task runs at a time.
-- ChatGPT polls `codex_task_status`, then reviews `execution_output` and
-  `git_diff` independently.
-- `cancel_codex_task` may terminate a task; partial edits can remain and still
-  require review.
+1. **Do the heavy reasoning on ChatGPT Web before dispatch.** Read enough
+   relevant code, diffs, released logs and configuration to understand the whole
+   user goal. Root-cause analysis, log/data analysis, architectural choices and
+   implementation planning belong to ChatGPT Web, not the local Codex worker.
+2. **Plan the whole coherent change, not the first symptom.** Do not split one
+   user goal into separate Codex tasks by file, error message, or implementation
+   step merely to keep each dispatch small.
+3. **Build one complete structured execution brief.** The
+   `submit_codex_task.execution_brief` must include: objective, verified current
+   state, web-side diagnosis, ordered implementation steps with exact
+   instructions/files/commands/verification, validation plan, success criteria,
+   constraints and risks. Write it for a lower-capability local model that should
+   not need to rediscover the architecture or invent the plan.
+4. **Dispatch once by default.** One coherent implementation goal should normally
+   produce one Codex invocation. A second invocation is appropriate only after
+   the first batch completes and independent review identifies a concrete,
+   previously unforeseen residual issue or blocker.
+5. **Reuse the same Codex thread.** The first remote task creates a saved
+   non-interactive Codex thread. The bridge persists its `thread_id`; later
+   tasks use `codex exec resume <thread_id>`. Never use `--ephemeral` for
+   direct-mode remote tasks. If Codex returns a different thread id while
+   resuming, fail closed and review partial edits instead of silently losing
+   context.
+6. **Keep the security boundary on every turn.** New and resumed runs stay in
+   `workspace-write`, approval policy `never`, with network access disabled.
+   Only one remote task runs at a time.
+7. **Do not busy-poll.** `submit_codex_task` and `codex_task_status` return
+   `pollIntervalSeconds` and `nextPollAt`. Do not call
+   `codex_task_status` before `nextPollAt` while the task is running unless
+   the user requests cancellation or there is a specific intervention reason.
+   The default cadence is 180 seconds.
+8. **Review deeply after execution.** Once terminal, inspect
+   `execution_output` when readable, then `git_diff` and relevant files.
+   Judge the entire success criteria together before deciding DONE or preparing
+   one corrective execution brief.
+9. `cancel_codex_task` may terminate a task; partial edits can remain and must
+   still be reviewed.
+
+Configure the polling cadence per workspace with `.c2c.json`:
+
+```json
+{
+  "pollIntervalSeconds": 180
+}
+```
+
+Accepted values are clamped to 30–3600 seconds. If omitted, the default is
+180 seconds (3 minutes).
 
 If ChatGPT receives `INSUFFICIENT_SCOPE` for `submit_codex_task`, re-authorize
 that workspace connector so it can request `execution.write`. Do not weaken or
