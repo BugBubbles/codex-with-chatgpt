@@ -402,27 +402,29 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(submitted.pollIntervalSeconds).toBe(180);
     expect(submitted.nextPollAt).toEqual(expect.any(String));
 
-    let terminal: { taskId: string; status: string; outputId: number | null; threadId: string | null; nextPollAt: string | null } | null = null;
-    for (let attempt = 0; attempt < 100; attempt++) {
-      const current = structuredJsonOf<{ taskId: string; status: string; outputId: number | null; threadId: string | null; nextPollAt: string | null }>(
-        await client.callTool({ name: "codex_task_status", arguments: { task_id: submitted.taskId } })
-      );
-      if (current.status !== "running") {
-        terminal = current;
-        break;
-      }
+    for (let attempt = 0; attempt < 100 && !fs.existsSync(path.join(root, "remote-task.txt")); attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    expect(terminal?.status).toBe("succeeded");
-    expect(terminal?.outputId).toEqual(expect.any(Number));
-    expect(terminal?.threadId).toBe("c2c-test-thread");
-    expect(terminal?.nextPollAt).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const terminal = structuredJsonOf<{
+      taskId: string;
+      status: string;
+      outputId: number | null;
+      threadId: string | null;
+      nextPollAt: string | null;
+    }>(
+      await client.callTool({ name: "codex_task_status", arguments: { task_id: submitted.taskId } })
+    );
+    expect(terminal.status).toBe("succeeded");
+    expect(terminal.outputId).toEqual(expect.any(Number));
+    expect(terminal.threadId).toBe("c2c-test-thread");
+    expect(terminal.nextPollAt).toBeNull();
     expect(fs.readFileSync(path.join(root, "remote-task.txt"), "utf8")).toContain("written by remote codex task");
 
     const output = structuredJsonOf<{ action: string; text: string }>(
       await client.callTool({
         name: "execution_output",
-        arguments: { action: "read", id: terminal!.outputId! },
+        arguments: { action: "read", id: terminal.outputId! },
       })
     );
     expect(output.text).toContain("promptReceived");
@@ -453,6 +455,14 @@ describe("MCP tools over Streamable HTTP", () => {
       .split("\n")
       .map((line) => JSON.parse(line) as { isResume: boolean });
     expect(invocations.at(-1)?.isResume).toBe(true);
+
+    const tooEarly = await client.callTool({
+      name: "codex_task_status",
+      arguments: { task_id: submitted.taskId },
+    });
+    expect(tooEarly.isError).toBe(true);
+    expect(textOf(tooEarly)).toContain("POLL_TOO_EARLY");
+    expect(textOf(tooEarly)).toContain("Do not poll again before");
 
     const cancelling = structuredJsonOf<{ taskId: string; status: string }>(
       await client.callTool({
