@@ -9,7 +9,8 @@
 
 底层 C2C Bridge、OAuth、Cloudflare Tunnel 和工作区隔离保持不变。
 本分支现在在原有“以读取为主”的 MCP 数据面之上增加一个受限执行控制面：
-ChatGPT 可以向本地 Codex CLI 提交目标、查询状态和取消任务，但不会获得裸 Shell。
+ChatGPT 网页端负责完成深度分析并向本地 Codex CLI 提交结构化、完整的实施文档，
+同时可以查询状态和取消任务，但不会获得裸 Shell。
 原来的人工 C2C 消息交接仍保留为兼容回退方式。
 
 ## 主要变化
@@ -122,17 +123,38 @@ https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAf
 
 ```text
 ChatGPT 网页
-    | submit_codex_task(goal)
+    | 深度分析 + 完整结构化实施文档
+    | submit_codex_task(execution_brief)
     v
-C2C Bridge ----> 本地 Codex CLI ----> 工作区修改/测试
-    ^                                      |
-    | codex_task_status / execution_output |
-    +--------------- git_diff -------------+
+C2C Bridge ----> 持久化的本地 Codex CLI thread ----> 工作区修改/测试
+    ^                                                     |
+    | codex_task_status / execution_output                |
+    +---------------------- git_diff ----------------------+
 ```
 
-远程任务使用非交互 `codex exec`，固定为 `workspace-write` 沙箱、
-`approval_policy="never"`、临时会话并关闭网络访问；同一工作区同时只允许一个远程任务。
-任务结束后 ChatGPT 应继续通过 `git_diff` 独立审查结果。
+ChatGPT 网页端承担规划和审查职责：应先读取足够的代码、diff、配置和已释放日志，
+完成根因分析、日志/数据分析、架构决策和实施规划，再针对一个完整用户目标生成一份
+高度详细的执行文档。文档必须精确说明每一步改什么、怎么改、涉及哪些文件、需要运行
+哪些本地命令、如何验证。默认假设本地 Codex 可能是能力较弱的模型，因此不应把主要
+规划工作重新交给本地端。
+
+第一次远程任务使用非交互 `codex exec` 并保存返回的 `thread_id`；之后统一使用
+`codex exec resume <thread_id>`，持续复用同一个 Codex 对话，而不是每一步创建
+新的临时会话。每一轮仍强制 `workspace-write`、`approval_policy="never"` 和
+关闭网络访问；同一工作区同时只允许一个远程任务。
+
+状态检查默认每 180 秒（3 分钟）一次，任务结果会返回 `nextPollAt`。可以在当前
+工作区的 `.c2c.json` 中配置：
+
+```json
+{
+  "pollIntervalSeconds": 180
+}
+```
+
+允许范围为 30–3600 秒。执行结束后，ChatGPT 再集中读取
+`execution_output`、`git_diff` 和相关文件进行完整审查；只有发现第一轮无法合理
+预见或处理的明确残余问题时，才提交下一份完整的修正执行文档。
 
 原来的 INIT / PLAN / EXECUTED 人工复制流程仍保留，适用于没有授权
 `execution.write` 的旧 Connector 或作为故障回退。
@@ -152,8 +174,9 @@ ChatGPT 会自己通过 MCP 调用：
 ## CLI-only 的控制方式
 
 本分支仍然不尝试自动点击 ChatGPT 网页，也不依赖 Codex Desktop。
-不同之处是：执行控制现在可以通过受限 MCP 工具直接派发给本地 `codex exec`，
-因此正常开发回合不再必须人工搬运 PLAN。人工 C2C 消息仅作为兼容和恢复路径。
+不同之处是：执行控制现在会把网页端完成深度规划后生成的完整执行文档派发给
+持久化的本地 `codex exec` thread，因此正常开发回合不再需要人工搬运 PLAN，
+也不应把一个完整目标拆成大量短小 Codex 调用。人工 C2C 消息仅作为兼容和恢复路径。
 
 ## 常用命令
 
@@ -185,7 +208,9 @@ Connector，并使用新地址重新创建同名 Connector。
 - 原有读取工具继续保留 workspace 边界、realpath 校验和敏感文件过滤；
 - 远程执行必须额外获得 `execution.write` OAuth scope；
 - 不提供裸 Shell、直接写文件、安装包或 git commit 类型 MCP 原语；
-- 每个任务由本地 Codex CLI 在 `workspace-write` 沙箱内执行，关闭网络访问；
+- 首轮和续接任务均由本地 Codex CLI 在 `workspace-write` 沙箱内执行并关闭网络访问；
+- 每个工作区保存一个持久化 Codex `thread_id`，续接时若 thread 发生漂移则失败关闭，
+  不会静默丢失上下文；
 - 同时只允许一个远程任务，并设置超时；
 - Codex 输出仍需经过本地 sanitizer 后才能通过 `execution_output` 返回。
 
