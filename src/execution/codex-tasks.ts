@@ -34,7 +34,7 @@ export interface SubmitCodexTaskInput {
 
 export class CodexTaskError extends Error {
   constructor(
-    readonly code: "TASK_BUSY" | "TASK_NOT_FOUND" | "CODEX_SPAWN_FAILED",
+    readonly code: "TASK_BUSY" | "TASK_NOT_FOUND" | "CODEX_SPAWN_FAILED" | "POLL_TOO_EARLY",
     message: string
   ) {
     super(message);
@@ -321,16 +321,30 @@ export class CodexTaskManager {
     return this.snapshot(task);
   }
 
-  get(taskId: string): CodexTaskSnapshot {
+  get(
+    taskId: string,
+    opts: { enforcePollInterval?: boolean } = {}
+  ): CodexTaskSnapshot {
     const task = this.tasks.get(taskId);
     if (!task) throw new CodexTaskError("TASK_NOT_FOUND", `No Codex task named ${taskId}.`);
-    if (!task.finalized && task.nextPollAtMs !== null) {
+
+    if (
+      opts.enforcePollInterval === true &&
+      task.snapshot.status === "running" &&
+      task.nextPollAtMs !== null
+    ) {
       const now = Date.now();
-      if (now >= task.nextPollAtMs) {
-        task.nextPollAtMs = now + this.pollIntervalSeconds * 1000;
-        task.snapshot.nextPollAt = new Date(task.nextPollAtMs).toISOString();
+      if (now < task.nextPollAtMs) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((task.nextPollAtMs - now) / 1000));
+        throw new CodexTaskError(
+          "POLL_TOO_EARLY",
+          `Codex task ${taskId} is still running. Do not poll again before ${new Date(task.nextPollAtMs).toISOString()} (about ${retryAfterSeconds} seconds).`
+        );
       }
+      task.nextPollAtMs = now + this.pollIntervalSeconds * 1000;
+      task.snapshot.nextPollAt = new Date(task.nextPollAtMs).toISOString();
     }
+
     return this.snapshot(task);
   }
 
