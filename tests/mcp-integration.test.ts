@@ -159,6 +159,7 @@ describe("MCP tools over Streamable HTTP", () => {
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
       "cancel_codex_task",
+      "clear_codex_session",
       "codex_task_status",
       "execution_output",
       "execution_summary",
@@ -188,6 +189,7 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "submit_codex_task", ["taskId", "status", "outputId", "threadId", "pollIntervalSeconds", "nextPollAt"]);
     expectToolOutputSchema(tools, "codex_task_status", ["taskId", "status", "outputId", "threadId", "pollIntervalSeconds", "nextPollAt"]);
     expectToolOutputSchema(tools, "cancel_codex_task", ["taskId", "status", "outputId", "threadId", "pollIntervalSeconds", "nextPollAt"]);
+    expectToolOutputSchema(tools, "clear_codex_session", ["cleared", "previousThreadId", "sessionActive"]);
   });
 
   it("documents git_diff pagination with its output field names", async () => {
@@ -481,6 +483,13 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(textOf(tooEarly)).toContain("POLL_TOO_EARLY");
     expect(textOf(tooEarly)).toContain("Do not poll again before");
 
+    const clearWhileRunning = await client.callTool({
+      name: "clear_codex_session",
+      arguments: {},
+    });
+    expect(clearWhileRunning.isError).toBe(true);
+    expect(textOf(clearWhileRunning)).toContain("TASK_BUSY");
+
     const cancelling = structuredJsonOf<{ taskId: string; status: string }>(
       await client.callTool({
         name: "cancel_codex_task",
@@ -498,6 +507,70 @@ describe("MCP tools over Streamable HTTP", () => {
       ).status;
     }
     expect(terminalStatus).toBe("cancelled");
+  });
+
+  it("clears the persistent Codex session locally and forces the next task to start fresh", async () => {
+    const sessionFile = path.join(stateDir, "codex-sessions", `${bridge.workspace.id}.json`);
+    expect(fs.existsSync(sessionFile)).toBe(true);
+
+    const cleared = structuredJsonOf<{
+      cleared: boolean;
+      previousThreadId: string | null;
+      sessionActive: false;
+    }>(
+      await client.callTool({
+        name: "clear_codex_session",
+        arguments: {},
+      })
+    );
+
+    expect(cleared).toEqual({
+      cleared: true,
+      previousThreadId: "c2c-test-thread",
+      sessionActive: false,
+    });
+    expect(fs.existsSync(sessionFile)).toBe(false);
+
+    const infoAfterClear = structuredJsonOf<{ execution: { sessionActive: boolean } }>(
+      await client.callTool({ name: "workspace_info", arguments: {} })
+    );
+    expect(infoAfterClear.execution.sessionActive).toBe(false);
+
+    const invocationFile = path.join(stateDir, "codex-invocations.jsonl");
+    const beforeCount = fs
+      .readFileSync(invocationFile, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean).length;
+
+    const submitted = structuredJsonOf<{ taskId: string; threadId: string | null }>(
+      await client.callTool({
+        name: "submit_codex_task",
+        arguments: { execution_brief: executionBrief("Start a fresh Codex thread after clearing the saved session") },
+      })
+    );
+    expect(submitted.threadId).toBeNull();
+
+    let invocations: { isResume: boolean }[] = [];
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (fs.existsSync(invocationFile)) {
+        invocations = fs
+          .readFileSync(invocationFile, "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { isResume: boolean });
+      }
+      if (invocations.length > beforeCount) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(invocations.length).toBeGreaterThan(beforeCount);
+    expect(invocations.at(-1)?.isResume).toBe(false);
+
+    for (let attempt = 0; attempt < 100 && !fs.existsSync(sessionFile); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(fs.existsSync(sessionFile)).toBe(true);
   });
 
   it("enforces scopes per tool", async () => {
@@ -522,6 +595,12 @@ describe("MCP tools over Streamable HTTP", () => {
     });
     expect(executeDenied.isError).toBe(true);
     expect(textOf(executeDenied)).toContain("INSUFFICIENT_SCOPE");
+    const clearDenied = await limitedClient.callTool({
+      name: "clear_codex_session",
+      arguments: {},
+    });
+    expect(clearDenied.isError).toBe(true);
+    expect(textOf(clearDenied)).toContain("INSUFFICIENT_SCOPE");
     const allowed = await limitedClient.callTool({ name: "read_file", arguments: { path: "hello.txt" } });
     expect(allowed.isError ?? false).toBe(false);
     await limitedClient.close();

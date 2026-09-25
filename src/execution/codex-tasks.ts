@@ -38,7 +38,7 @@ export interface SubmitCodexTaskInput {
 
 export class CodexTaskError extends Error {
   constructor(
-    readonly code: "TASK_BUSY" | "TASK_NOT_FOUND" | "CODEX_SPAWN_FAILED" | "POLL_TOO_EARLY",
+    readonly code: "TASK_BUSY" | "TASK_NOT_FOUND" | "CODEX_SPAWN_FAILED" | "POLL_TOO_EARLY" | "SESSION_CLEAR_FAILED",
     message: string
   ) {
     super(message);
@@ -427,6 +427,49 @@ export class CodexTaskManager {
     if (task.finalized || task.terminationStatus) return this.snapshot(task);
     this.requestTermination(task, "cancelled", "Cancelled by ChatGPT.");
     return this.snapshot(task);
+  }
+
+  clearSession(): {
+    cleared: boolean;
+    previousThreadId: string | null;
+    sessionActive: false;
+  } {
+    if (this.activeTaskId) {
+      const active = this.tasks.get(this.activeTaskId);
+      if (active && !active.finalized) {
+        throw new CodexTaskError(
+          "TASK_BUSY",
+          `Codex task ${active.snapshot.taskId} is still running. Cancel it or wait for it to finish before clearing the persistent session.`
+        );
+      }
+      this.activeTaskId = null;
+    }
+
+    const previousThreadId = this.threadId;
+    const stateFile = sessionStateFile(this.workspace.id);
+    const existed = fs.existsSync(stateFile);
+
+    try {
+      fs.rmSync(stateFile, { force: true });
+    } catch (error) {
+      throw new CodexTaskError(
+        "SESSION_CLEAR_FAILED",
+        `Failed to clear the persisted Codex session: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    this.threadId = null;
+    this.logger.info(
+      previousThreadId
+        ? `Cleared persistent Codex session ${previousThreadId} for workspace ${this.workspace.id}`
+        : `Cleared persistent Codex session state for workspace ${this.workspace.id}`
+    );
+
+    return {
+      cleared: existed || previousThreadId !== null,
+      previousThreadId,
+      sessionActive: false,
+    };
   }
 
   async shutdown(): Promise<void> {

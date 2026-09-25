@@ -200,6 +200,12 @@ const codexTaskOutputSchema = {
   nextPollAt: z.string().nullable(),
 };
 
+const clearCodexSessionOutputSchema = {
+  cleared: z.boolean(),
+  previousThreadId: z.string().nullable(),
+  sessionActive: z.literal(false),
+};
+
 const executionStepSchema = z.object({
   title: z.string().min(3).max(200).describe("Specific implementation step title"),
   instructions: z
@@ -713,6 +719,33 @@ export function createMcpServer(ctx: McpContext): McpServer {
       if (denied) return denied;
       try {
         return okStructured(taskManager.cancel(args.task_id));
+      } catch (error) {
+        if (error instanceof CodexTaskError) return fail(error.code, error.message);
+        return mapError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "clear_codex_session",
+    {
+      title: "Clear Codex session",
+      description:
+        "Clear the persistent Codex thread saved for this connected workspace directly in the local bridge. This does not invoke Codex and does not modify workspace files. The next submit_codex_task starts a fresh Codex thread. Refuses to clear while a Codex task is still running.",
+      inputSchema: {},
+      outputSchema: clearCodexSessionOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (_args, extra) => {
+      const denied = requireScope(extra.authInfo, "execution.write");
+      if (denied) return denied;
+      try {
+        return okStructured(taskManager.clearSession());
       } catch (error) {
         if (error instanceof CodexTaskError) return fail(error.code, error.message);
         return mapError(error);

@@ -199,6 +199,14 @@ Do not immediately overwrite the workspace. First inspect `git_status`,
 have left partial edits. Once those edits are understood, the next submitted
 batch creates a fresh persistent Codex thread and stores its new id.
 
+A remote client with the `execution.write` scope can also call the MCP tool
+`clear_codex_session`. The bridge deletes only this workspace's persisted
+Codex session pointer and clears the in-memory thread id directly; it does not
+launch Codex and does not modify workspace files. The tool refuses to run while
+a Codex task is active. After a successful clear,
+`workspace_info.execution.sessionActive` is false and the next
+`submit_codex_task` starts a fresh thread.
+
 ### Reading a file returns ACCESS_DENIED_SENSITIVE_FILE
 Working as intended: `.env`, keys, credentials and anything matched by
 `.c2cignore` are never readable through ChatGPT. `.env.example` is allowed.
