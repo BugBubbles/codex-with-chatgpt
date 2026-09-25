@@ -69,6 +69,7 @@ const workspaceInfoOutputSchema = {
   execution: z.object({
     persistentSession: z.literal(true),
     pollIntervalSeconds: z.number().int().min(30).max(3600),
+    approvalPolicy: z.enum(["never", "on-request"]),
     sessionActive: z.boolean(),
   }),
 };

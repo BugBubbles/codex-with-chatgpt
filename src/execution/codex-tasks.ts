@@ -4,7 +4,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Logger } from "../logger/index.js";
 import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
-import { DEFAULT_POLL_INTERVAL_SECONDS, type Workspace } from "../workspace/manager.js";
+import {
+  DEFAULT_POLL_INTERVAL_SECONDS,
+  type CodexApprovalPolicy,
+  type Workspace,
+} from "../workspace/manager.js";
 import { gitStatus } from "../workspace/git.js";
 import { saveExecutionOutput } from "./output.js";
 import { appendExecutionRecord } from "./records.js";
@@ -141,6 +145,7 @@ export class CodexTaskManager {
   private readonly argsPrefix: string[];
   private readonly maxCapturedChars: number;
   private readonly pollIntervalSeconds: number;
+  private readonly approvalPolicy: CodexApprovalPolicy;
   private activeTaskId: string | null = null;
   private threadId: string | null;
 
@@ -159,13 +164,20 @@ export class CodexTaskManager {
         Math.floor(opts.pollIntervalSeconds ?? workspace.projectConfig.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS)
       )
     );
+    this.approvalPolicy = workspace.projectConfig.codexApprovalPolicy ?? "never";
     this.threadId = readSessionThreadId(workspace.id);
   }
 
-  executionPolicy(): { persistentSession: true; pollIntervalSeconds: number; sessionActive: boolean } {
+  executionPolicy(): {
+    persistentSession: true;
+    pollIntervalSeconds: number;
+    approvalPolicy: CodexApprovalPolicy;
+    sessionActive: boolean;
+  } {
     return {
       persistentSession: true,
       pollIntervalSeconds: this.pollIntervalSeconds,
+      approvalPolicy: this.approvalPolicy,
       sessionActive: this.threadId !== null,
     };
   }
@@ -192,7 +204,7 @@ export class CodexTaskManager {
       "exec",
       "--json",
       "--config",
-      'approval_policy="never"',
+      `approval_policy="${this.approvalPolicy}"`,
       "--skip-git-repo-check",
     ];
 

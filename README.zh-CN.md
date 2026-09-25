@@ -140,19 +140,24 @@ ChatGPT 网页端承担规划和审查职责：应先读取足够的代码、dif
 
 第一次远程任务使用非交互 `codex exec` 并保存返回的 `thread_id`；之后统一使用
 `codex exec resume <thread_id>`，持续复用同一个 Codex 对话，而不是每一步创建
-新的临时会话。每一轮仍强制 `workspace-write`、`approval_policy="never"` 和
-关闭网络访问；同一工作区同时只允许一个远程任务。
+新的临时会话。每一轮仍强制 `workspace-write` 并关闭网络访问。
+审批策略默认是 `approval_policy="never"`；如果本机 Codex 因 Linux 沙箱限制
+需要使用正常的受控沙箱外回退，可在当前工作区的 `.c2c.json` 中显式设置
+`codexApprovalPolicy: "on-request"`。同一工作区同时只允许一个远程任务。
 
 状态检查默认每 180 秒（3 分钟）一次，任务结果会返回 `nextPollAt`。可以在当前
 工作区的 `.c2c.json` 中配置：
 
 ```json
 {
-  "pollIntervalSeconds": 180
+  "pollIntervalSeconds": 180,
+  "codexApprovalPolicy": "on-request"
 }
 ```
 
-允许范围为 30–3600 秒。执行结束后，ChatGPT 再集中读取
+`codexApprovalPolicy` 只接受 `"never"`（默认）和 `"on-request"`。
+该设置只能来自本地工作区配置，远端 MCP 调用不能选择或覆盖审批策略。
+轮询间隔允许范围为 30–3600 秒。执行结束后，ChatGPT 再集中读取
 `execution_output`、`git_diff` 和相关文件进行完整审查；只有发现第一轮无法合理
 预见或处理的明确残余问题时，才提交下一份完整的修正执行文档。
 
@@ -209,6 +214,9 @@ Connector，并使用新地址重新创建同名 Connector。
 - 远程执行必须额外获得 `execution.write` OAuth scope；
 - 不提供裸 Shell、直接写文件、安装包或 git commit 类型 MCP 原语；
 - 首轮和续接任务均由本地 Codex CLI 在 `workspace-write` 沙箱内执行并关闭网络访问；
+- 审批策略默认 `never`；本机用户可在 `.c2c.json` 显式设置
+  `codexApprovalPolicy: "on-request"`，用于 Linux 沙箱不可用时让 Codex 使用其
+  正常的受控沙箱外回退。远端 MCP 调用不能改变该策略；
 - 每个工作区保存一个持久化 Codex `thread_id`，续接时若 thread 发生漂移则失败关闭，
   不会静默丢失上下文；
 - 同时只允许一个远程任务，并设置超时；

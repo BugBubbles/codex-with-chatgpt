@@ -182,18 +182,29 @@ describe("workspace identity", () => {
         name: "Remi",
         maxIterations: 12,
         pollIntervalSeconds: 240,
+        codexApprovalPolicy: "on-request",
       })
     );
     const namedWs = new Workspace(named);
     expect(namedWs.name).toBe("Remi");
     expect(namedWs.projectConfig.maxIterations).toBe(12);
     expect(namedWs.projectConfig.pollIntervalSeconds).toBe(240);
+    expect(namedWs.projectConfig.codexApprovalPolicy).toBe("on-request");
     cleanup(named);
   });
 
   it("falls back to the directory name when .c2c.json has invalid types", () => {
     const invalid = makeTmpDir("invalid-project-config");
-    write(invalid, ".c2c.json", JSON.stringify({ name: 42, maxIterations: "many", pollIntervalSeconds: "fast" }));
+    write(
+      invalid,
+      ".c2c.json",
+      JSON.stringify({
+        name: 42,
+        maxIterations: "many",
+        pollIntervalSeconds: "fast",
+        codexApprovalPolicy: "always",
+      })
+    );
 
     const invalidWs = new Workspace(invalid);
 

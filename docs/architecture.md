@@ -67,8 +67,10 @@ structured execution brief for the complete coherent goal. The call then flows t
 `submit_codex_task` → `execution.write` scope check → CodexTaskManager.
 
 For the first batch, CodexTaskManager starts local `codex exec` with the
-`workspace-write` sandbox, approval policy `never`, the workspace as cwd and network
-access disabled. It captures `thread.started.thread_id` and persists it per workspace.
+`workspace-write` sandbox, the locally configured approval policy, the workspace as cwd
+and network access disabled. The approval policy defaults to `never`; a local
+`.c2c.json` may opt into `on-request`. The MCP task API cannot override it.
+The manager captures `thread.started.thread_id` and persists it per workspace.
 Later batches use `codex exec resume <thread_id>` and explicitly reapply
 `sandbox_mode="workspace-write"` plus network denial. The formatted implementation brief
 is sent over stdin; the bridge never accepts a caller-supplied shell command.

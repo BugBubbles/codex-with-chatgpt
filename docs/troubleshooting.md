@@ -95,6 +95,47 @@ there, so each new chat looks like a health-check failure.
 (`%USERPROFILE%\.codex\config.toml` on Windows). After that, later chats
 do not need elevation.
 
+### Linux sandbox fails but local Codex succeeds after escalation
+Some Linux hosts allow Codex itself to run but block bubblewrap/user-namespace setup.
+A typical symptom is `bwrap: setting up uid map: Permission denied`, while an
+interactive or direct `codex exec` with approval `on-request` successfully retries
+the command outside the broken filesystem sandbox.
+
+For that host only, set the workspace's local `.c2c.json`:
+
+```json
+{
+  "codexApprovalPolicy": "on-request"
+}
+```
+
+The default remains `"never"`. This setting is not accepted by the MCP task submission
+API; only the local operator can enable it. Restart the bridge after changing
+`.c2c.json`. `workspace_info.execution.approvalPolicy` reports the active value.
+
+### Local HTTP/SOCKS proxy
+C2C does not need a separate proxy field. The daemon inherits the environment from the
+shell that starts it, and spawned Codex processes inherit the daemon environment again.
+`cloudflared` is also spawned without replacing the parent environment.
+
+For an HTTP proxy listening on port 8848, for example:
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:8848
+export HTTPS_PROXY=http://127.0.0.1:8848
+export NO_PROXY=127.0.0.1,localhost
+c2c stop -w <workspace>
+c2c start -w <workspace> --tunnel
+```
+
+If port 8848 is a SOCKS proxy instead, use the proxy scheme supported by the client,
+commonly `ALL_PROXY=socks5://127.0.0.1:8848`. Restart the bridge after changing proxy
+environment variables because the detached daemon captures its environment at launch.
+
+This proxy environment affects host-side network clients such as Codex API access or
+`cloudflared` when they honor those variables. It does not override the remote task's
+existing `sandbox_workspace_write.network_access=false` policy.
+
 ### Port already in use
 Handled automatically: an existing healthy bridge for the same workspace is
 reused; anything else makes the bridge pick a free port. Configuration follows

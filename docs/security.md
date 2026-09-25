@@ -28,7 +28,7 @@
 | Arbitrary remote shell | No shell command string is accepted by MCP. The caller supplies a structured implementation brief plus bounded model/reasoning/timeout options |
 | Broad remote writes | Initial Codex runs use the `workspace-write` sandbox and the workspace as cwd; resumed turns explicitly reapply `sandbox_mode="workspace-write"`; direct bridge file-write tools do not exist |
 | Silent Codex context loss | The bridge persists the first `thread.started.thread_id`, resumes that exact thread on later tasks, and fails closed if a resume reports a different thread id |
-| Approval escalation | Remote `codex exec` uses `--config approval_policy="never"`; a task cannot pause and obtain broader permission interactively |
+| Approval escalation | Remote `codex exec` defaults to `approval_policy="never"`. A local `.c2c.json` may opt into `"on-request"` for Codex's controlled sandbox fallback; the MCP submit API cannot choose or override this policy |
 | Network exfiltration by a remote task | `sandbox_workspace_write.network_access=false` is forced for remotely submitted tasks |
 | Concurrent workspace corruption | Only one remotely submitted Codex task may run at a time |
 | Runaway process | Remote tasks have a bounded 30–3600 second timeout and an explicit cancellation tool |
@@ -76,7 +76,7 @@ thread:
 ```text
 codex exec --json \
   --sandbox workspace-write \
-  --config approval_policy="never" \
+  --config approval_policy="<never|on-request>" \
   --skip-git-repo-check \
   --cd <workspace> \
   --config sandbox_workspace_write.network_access=false \
@@ -88,7 +88,7 @@ C2C state directory. Later remote turns resume that exact thread:
 
 ```text
 codex exec --json \
-  --config approval_policy="never" \
+  --config approval_policy="<never|on-request>" \
   --skip-git-repo-check \
   --config sandbox_mode="workspace-write" \
   --config sandbox_workspace_write.network_access=false \
@@ -99,6 +99,11 @@ codex exec --json \
 Direct-mode tasks deliberately do **not** use `--ephemeral`. If a resume reports a
 different `thread.started.thread_id`, the bridge treats that as context loss, clears the
 stale session record and fails the task so partial edits can be reviewed.
+
+The approval value above comes only from the local workspace's `.c2c.json` and defaults
+to `never`. Choosing `on-request` materially weakens the no-escalation guarantee: Codex
+may request its normal controlled sandbox-out execution when the OS sandbox cannot run.
+Because the MCP schema has no approval-policy field, a remote caller cannot turn this on.
 
 The structured execution brief is rendered as a detailed Markdown implementation document
 and provided on stdin rather than interpolated into a shell command. Optional model and

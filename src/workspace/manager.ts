@@ -57,10 +57,13 @@ export interface ListDirectoryResult {
 
 export const DEFAULT_POLL_INTERVAL_SECONDS = 180;
 
+export type CodexApprovalPolicy = "never" | "on-request";
+
 export interface ProjectConfig {
   name?: string;
   maxIterations?: number;
   pollIntervalSeconds?: number;
+  codexApprovalPolicy?: CodexApprovalPolicy;
 }
 
 function parseProjectConfig(value: unknown): ProjectConfig {
@@ -73,6 +76,9 @@ function parseProjectConfig(value: unknown): ProjectConfig {
   }
   if (typeof raw.pollIntervalSeconds === "number" && Number.isFinite(raw.pollIntervalSeconds)) {
     config.pollIntervalSeconds = Math.max(30, Math.min(3600, Math.floor(raw.pollIntervalSeconds)));
+  }
+  if (raw.codexApprovalPolicy === "never" || raw.codexApprovalPolicy === "on-request") {
+    config.codexApprovalPolicy = raw.codexApprovalPolicy;
   }
   return config;
 }

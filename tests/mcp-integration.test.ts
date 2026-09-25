@@ -87,7 +87,7 @@ if (argv.includes("--ephemeral")) {
   process.exit(2);
 }
 const configPairs = argv.flatMap((value, index) => value === "--config" ? [argv[index + 1]] : []);
-if (!configPairs.includes('approval_policy="never"') || !configPairs.includes("sandbox_workspace_write.network_access=false")) {
+if (!configPairs.includes('approval_policy="on-request"') || !configPairs.includes("sandbox_workspace_write.network_access=false")) {
   process.stderr.write("missing security config override\\n");
   process.exit(2);
 }
@@ -120,6 +120,7 @@ process.stdout.write(JSON.stringify({ type: "result", promptReceived: prompt.len
   );
   root = makeTmpDir("mcp-ws");
   makeGitRepo(root);
+  write(root, ".c2c.json", JSON.stringify({ codexApprovalPolicy: "on-request" }));
   write(root, "package.json", JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, dependencies: { react: "^19.0.0" } }));
   write(root, ".env", "API_KEY=supersecret\n");
   // an uncommitted change so git_diff has content
@@ -205,7 +206,12 @@ describe("MCP tools over Streamable HTTP", () => {
       projectType: string;
       frameworks: string[];
       git: { isRepo: boolean; branch: string };
-      execution: { persistentSession: boolean; pollIntervalSeconds: number; sessionActive: boolean };
+      execution: {
+        persistentSession: boolean;
+        pollIntervalSeconds: number;
+        approvalPolicy: "never" | "on-request";
+        sessionActive: boolean;
+      };
     }>(result);
     expect(info.workspaceId).toBe(bridge.workspace.id);
     expect(info.projectType).toBe("node");
@@ -215,6 +221,7 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(info.execution).toEqual({
       persistentSession: true,
       pollIntervalSeconds: 180,
+      approvalPolicy: "on-request",
       sessionActive: false,
     });
   });

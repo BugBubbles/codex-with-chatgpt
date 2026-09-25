@@ -122,8 +122,10 @@ main planning.
 The first remote task uses non-interactive `codex exec` and stores the returned
 `thread_id`. Later tasks use `codex exec resume <thread_id>`, so the same
 Codex conversation is reused instead of starting an ephemeral session every
-time. Every turn keeps the workspace-write sandbox, approval policy `never`,
-and network access disabled. Only one remote task runs at a time.
+time. Every turn keeps the workspace-write sandbox and network access disabled.
+The approval policy defaults to `never`, but a local workspace may opt into
+`on-request` through `.c2c.json` when its Codex installation needs the normal
+sandbox-escalation fallback. Only one remote task runs at a time.
 
 Status polling is intentionally slow. The default cadence is 180 seconds
 (3 minutes), and task results expose `nextPollAt`. Configure it in the
@@ -131,11 +133,15 @@ workspace's `.c2c.json`:
 
 ```json
 {
-  "pollIntervalSeconds": 180
+  "pollIntervalSeconds": 180,
+  "codexApprovalPolicy": "on-request"
 }
 ```
 
-Values are clamped to 30–3600 seconds. After completion ChatGPT independently
+`codexApprovalPolicy` accepts only `"never"` (default) or `"on-request"`.
+It is read only from the local workspace config; remote MCP callers cannot select
+or override the approval policy. Poll values are clamped to 30–3600 seconds.
+After completion ChatGPT independently
 reviews `execution_output`, `git_diff` and relevant files before deciding
 whether the goal is done or a genuinely necessary corrective batch is required.
 
@@ -180,9 +186,11 @@ Execution is explicit and scoped rather than a generic remote shell:
 - Remote execution requires the separate `execution.write` OAuth scope.
 - The MCP server exposes task submission/status/cancellation, not arbitrary shell,
   direct file-write, package-install or git-commit primitives.
-- Initial and resumed tasks run Codex with `workspace-write`, no approval
-  escalation and network access disabled; Codex is also instructed not to commit,
-  push or expose secrets.
+- Initial and resumed tasks run Codex with `workspace-write` and network access
+  disabled. Approval escalation is `never` by default; the local operator may
+  explicitly set `codexApprovalPolicy: "on-request"` in `.c2c.json` for hosts
+  where Codex must fall back from a broken filesystem sandbox. Remote MCP callers
+  cannot change this setting; Codex is also instructed not to commit, push or expose secrets.
 - One persistent Codex `thread_id` is stored per workspace; resume thread drift
   fails closed rather than silently losing context.
 - Only one remote task may run at a time and tasks have a bounded timeout.

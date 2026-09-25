@@ -79,15 +79,19 @@ Direct-mode remote execution intentionally does **not** use `--ephemeral`.
   bridge clears the stale saved id, fails the task and requires review before a
   fresh dispatch. It never silently accepts context loss.
 
-Per-workspace polling configuration:
+Per-workspace execution configuration:
 
 ```json
 {
-  "pollIntervalSeconds": 180
+  "pollIntervalSeconds": 180,
+  "codexApprovalPolicy": "on-request"
 }
 ```
 
-Values are clamped to 30–3600 seconds. Omitted value: 180 seconds.
+`pollIntervalSeconds` is clamped to 30–3600 seconds; omitted value: 180 seconds.
+`codexApprovalPolicy` accepts only `"never"` (default) or `"on-request"`. It is
+local-only configuration and is intentionally absent from `submit_codex_task`, so the
+remote planner cannot enable approval escalation.
 
 ## States
 
