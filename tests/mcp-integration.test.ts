@@ -29,6 +29,33 @@ function structuredJsonOf<T = Record<string, unknown>>(result: { content?: unkno
   return parsed;
 }
 
+function executionBrief(title = "Implement the requested workspace change") {
+  return {
+    title,
+    objective:
+      "Complete the requested workspace change as one coherent implementation batch and leave the project in a validated, reviewable state.",
+    current_state:
+      "ChatGPT Web has inspected the relevant workspace state and identified the files and validation surface needed for this integration-test execution.",
+    diagnosis:
+      "The requested change is self-contained. The local Codex worker should execute the prescribed edits and validation directly instead of performing a new planning phase or splitting the work into separate tasks.",
+    implementation_steps: [
+      {
+        title: "Apply the implementation",
+        instructions:
+          "Carry out the requested change in the current workspace exactly as described by the objective. Keep the edit localized, preserve existing behavior outside the requested scope, and finish all implementation work in this same Codex turn.",
+        files: ["remote-task.txt"],
+        commands: [],
+        verification:
+          "Verify the requested workspace artifact exists with the expected contents before reporting the turn complete.",
+      },
+    ],
+    validation_plan: ["Check the resulting workspace artifact and report any execution failure in the final Codex output."],
+    success_criteria: ["The requested artifact exists and the Codex task exits successfully without leaving an unresolved blocker."],
+    constraints: ["Remain inside the current workspace, keep network access disabled, and do not commit or push changes."],
+    risks: ["Do not replace the requested implementation with a planning-only response."],
+  };
+}
+
 function expectToolOutputSchema(
   tools: Awaited<ReturnType<Client["listTools"]>>["tools"],
   name: string,
@@ -48,20 +75,41 @@ beforeAll(async () => {
     "codex-stub.mjs",
     `import fs from "node:fs";
 const argv = process.argv.slice(2);
-const required = ["exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "--cd"];
-for (const value of required) {
+const isResume = argv.includes("resume");
+for (const value of ["exec", "--json", "--skip-git-repo-check"]) {
   if (!argv.includes(value)) {
     process.stderr.write("missing expected arg: " + value + "\\n");
     process.exit(2);
   }
+}
+if (argv.includes("--ephemeral")) {
+  process.stderr.write("remote tasks must not use ephemeral sessions\\n");
+  process.exit(2);
 }
 const configPairs = argv.flatMap((value, index) => value === "--config" ? [argv[index + 1]] : []);
 if (!configPairs.includes('approval_policy="never"') || !configPairs.includes("sandbox_workspace_write.network_access=false")) {
   process.stderr.write("missing security config override\\n");
   process.exit(2);
 }
+if (isResume) {
+  const resumeIndex = argv.indexOf("resume");
+  if (argv[resumeIndex + 1] !== "c2c-test-thread") {
+    process.stderr.write("wrong resumed thread id\\n");
+    process.exit(2);
+  }
+  if (!configPairs.includes('sandbox_mode="workspace-write"')) {
+    process.stderr.write("resume must reapply workspace-write sandbox via config\\n");
+    process.exit(2);
+  }
+} else if (!argv.includes("--sandbox") || !argv.includes("workspace-write") || !argv.includes("--cd")) {
+  process.stderr.write("initial task missing workspace sandbox/cwd args\\n");
+  process.exit(2);
+}
+const invocationLog = process.env.C2C_STATE_DIR + "/codex-invocations.jsonl";
+fs.appendFileSync(invocationLog, JSON.stringify({ argv, isResume }) + "\\n");
 let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk.toString();
+process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "c2c-test-thread" }) + "\\n");
 if (prompt.includes("C2C_TEST_SLOW")) {
   await new Promise((resolve) => setTimeout(resolve, 5000));
 } else {
@@ -127,7 +175,7 @@ describe("MCP tools over Streamable HTTP", () => {
       expect(names).not.toContain(forbidden);
     }
 
-    expectToolOutputSchema(tools, "workspace_info", ["workspaceId", "workspaceName", "projectType", "git"]);
+    expectToolOutputSchema(tools, "workspace_info", ["workspaceId", "workspaceName", "projectType", "git", "execution"]);
     expectToolOutputSchema(tools, "list_directory", ["path", "entries", "total", "hasMore"]);
     expectToolOutputSchema(tools, "read_file", ["path", "content", "startLine", "endLine", "nextStartLine"]);
     expectToolOutputSchema(tools, "search_workspace", ["matches", "matchCount", "truncated", "engine"]);
@@ -136,9 +184,9 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
     expectToolOutputSchema(tools, "execution_summary", ["records"]);
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
-    expectToolOutputSchema(tools, "submit_codex_task", ["taskId", "status", "outputId"]);
-    expectToolOutputSchema(tools, "codex_task_status", ["taskId", "status", "outputId"]);
-    expectToolOutputSchema(tools, "cancel_codex_task", ["taskId", "status", "outputId"]);
+    expectToolOutputSchema(tools, "submit_codex_task", ["taskId", "status", "outputId", "threadId", "pollIntervalSeconds", "nextPollAt"]);
+    expectToolOutputSchema(tools, "codex_task_status", ["taskId", "status", "outputId", "threadId", "pollIntervalSeconds", "nextPollAt"]);
+    expectToolOutputSchema(tools, "cancel_codex_task", ["taskId", "status", "outputId", "threadId", "pollIntervalSeconds", "nextPollAt"]);
   });
 
   it("documents git_diff pagination with its output field names", async () => {
@@ -152,12 +200,23 @@ describe("MCP tools over Streamable HTTP", () => {
 
   it("workspace_info returns identity and project detection", async () => {
     const result = await client.callTool({ name: "workspace_info", arguments: {} });
-    const info = structuredJsonOf<{ workspaceId: string; projectType: string; frameworks: string[]; git: { isRepo: boolean; branch: string } }>(result);
+    const info = structuredJsonOf<{
+      workspaceId: string;
+      projectType: string;
+      frameworks: string[];
+      git: { isRepo: boolean; branch: string };
+      execution: { persistentSession: boolean; pollIntervalSeconds: number; sessionActive: boolean };
+    }>(result);
     expect(info.workspaceId).toBe(bridge.workspace.id);
     expect(info.projectType).toBe("node");
     expect(info.frameworks).toContain("React");
     expect(info.git.isRepo).toBe(true);
     expect(info.git.branch).toBe("main");
+    expect(info.execution).toEqual({
+      persistentSession: true,
+      pollIntervalSeconds: 180,
+      sessionActive: false,
+    });
   });
 
   it("read_file returns hello.txt", async () => {
@@ -336,14 +395,16 @@ describe("MCP tools over Streamable HTTP", () => {
     const submitted = structuredJsonOf<{ taskId: string; status: string }>(
       await client.callTool({
         name: "submit_codex_task",
-        arguments: { goal: "Create remote-task.txt for the integration test." },
+        arguments: { execution_brief: executionBrief("Create remote-task.txt for the integration test") },
       })
     );
     expect(submitted.status).toBe("running");
+    expect(submitted.pollIntervalSeconds).toBe(180);
+    expect(submitted.nextPollAt).toEqual(expect.any(String));
 
-    let terminal: { taskId: string; status: string; outputId: number | null } | null = null;
+    let terminal: { taskId: string; status: string; outputId: number | null; threadId: string | null; nextPollAt: string | null } | null = null;
     for (let attempt = 0; attempt < 100; attempt++) {
-      const current = structuredJsonOf<{ taskId: string; status: string; outputId: number | null }>(
+      const current = structuredJsonOf<{ taskId: string; status: string; outputId: number | null; threadId: string | null; nextPollAt: string | null }>(
         await client.callTool({ name: "codex_task_status", arguments: { task_id: submitted.taskId } })
       );
       if (current.status !== "running") {
@@ -354,6 +415,8 @@ describe("MCP tools over Streamable HTTP", () => {
     }
     expect(terminal?.status).toBe("succeeded");
     expect(terminal?.outputId).toEqual(expect.any(Number));
+    expect(terminal?.threadId).toBe("c2c-test-thread");
+    expect(terminal?.nextPollAt).toBeNull();
     expect(fs.readFileSync(path.join(root, "remote-task.txt"), "utf8")).toContain("written by remote codex task");
 
     const output = structuredJsonOf<{ action: string; text: string }>(
@@ -369,9 +432,28 @@ describe("MCP tools over Streamable HTTP", () => {
     const submitted = structuredJsonOf<{ taskId: string }>(
       await client.callTool({
         name: "submit_codex_task",
-        arguments: { goal: "C2C_TEST_SLOW" },
+        arguments: {
+          execution_brief: {
+            ...executionBrief("Exercise cancellation on the persistent Codex thread"),
+            implementation_steps: [
+              {
+                ...executionBrief().implementation_steps[0],
+                instructions:
+                  "C2C_TEST_SLOW. Remain in this execution turn long enough for the integration test to issue cancellation while preserving the same persistent Codex thread and without starting a new planning phase.",
+              },
+            ],
+          },
+        },
       })
     );
+    expect(submitted.threadId).toBe("c2c-test-thread");
+    const invocations = fs
+      .readFileSync(path.join(stateDir, "codex-invocations.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { isResume: boolean });
+    expect(invocations.at(-1)?.isResume).toBe(true);
+
     const cancelling = structuredJsonOf<{ taskId: string; status: string }>(
       await client.callTool({
         name: "cancel_codex_task",
@@ -409,7 +491,7 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(textOf(outputDenied)).toContain("INSUFFICIENT_SCOPE");
     const executeDenied = await limitedClient.callTool({
       name: "submit_codex_task",
-      arguments: { goal: "This must not run." },
+      arguments: { execution_brief: executionBrief("This must not run") },
     });
     expect(executeDenied.isError).toBe(true);
     expect(textOf(executeDenied)).toContain("INSUFFICIENT_SCOPE");
