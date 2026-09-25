@@ -1,9 +1,9 @@
 ---
 name: codex-with-chatgpt
 description: >
-  CLI-only Codex + ChatGPT collaboration. Use ChatGPT Web as the planning and
-  review brain while Codex CLI owns execution. No Codex desktop app and no
-  in-app browser are required. Browser steps are performed manually by the user.
+  CLI-only Codex + ChatGPT collaboration. ChatGPT Web can plan/review and,
+  when execution.write is authorized, dispatch bounded tasks to local Codex CLI.
+  No Codex desktop app or in-app browser is required.
 ---
 
 # Codex with ChatGPT — CLI-only
@@ -15,16 +15,17 @@ install, launch, or depend on the Codex desktop app, ChatGPT desktop app,
 `control-in-app-browser`, `agent.browsers`, Computer Use, or any in-app
 browser capability.
 
-The C2C Bridge gives ChatGPT read-only MCP access to the current workspace.
-Codex CLI owns edits, shell commands, git and tests. ChatGPT owns high-level
-planning and independent review.
+The C2C Bridge exposes read-oriented workspace tools plus an optional scoped
+execution control plane. Codex CLI still owns edits, shell commands, git and
+tests; ChatGPT may only submit/cancel a Codex goal when the connector has the
+separate `execution.write` OAuth scope. No generic remote shell is exposed.
 
 ## CLI-only contract
 
 1. **Never automate ChatGPT Web.** The user uses their normal browser.
 2. **Never ask the user to paste file bodies, diffs, or logs.** ChatGPT reads
-   those through MCP. Only small C2C control messages are copied between the
-   terminal and ChatGPT.
+   those through MCP. In direct mode no task control message needs copy/paste;
+   the small C2C messages remain only for the manual fallback flow.
 3. **Never expose long-lived credentials.** The only browser-entered secret is
    the short-lived one-time pairing code produced by `c2c pair`.
 4. **One workspace = one connector.** Reuse the connector name returned by C2C.
@@ -36,7 +37,9 @@ planning and independent review.
    `c2c doctor -w <workspace> --json`. Do not ask the user to send C2C
    messages until bridge/MCP/tunnel health is good and any connector repair has
    been completed.
-7. Keep control messages under 1 KB. They contain state and metadata only.
+7. Keep manual fallback control messages under 1 KB. They contain state and metadata only.
+8. Existing connectors must be re-authorized before remote execution works; never
+   assume an old token has `execution.write`.
 
 ## Locations
 
@@ -184,7 +187,28 @@ Codex with ChatGPT — CLI-only
 Ready.
 ```
 
-## Workflow: normal task
+## Workflow: ChatGPT-originated direct execution
+
+When the user starts the coding task from ChatGPT Web and the connector exposes
+`submit_codex_task`, the bridge itself launches non-interactive Codex CLI. The
+interactive Codex session does not need to receive PLAN text manually.
+
+Direct mode contract:
+
+- ChatGPT submits a concrete goal, not an arbitrary shell command.
+- The bridge uses `codex exec` with `workspace-write`, approval policy `never`,
+  an ephemeral session and network access disabled.
+- Only one remote task runs at a time.
+- ChatGPT polls `codex_task_status`, then reviews `execution_output` and
+  `git_diff` independently.
+- `cancel_codex_task` may terminate a task; partial edits can remain and still
+  require review.
+
+If ChatGPT receives `INSUFFICIENT_SCOPE` for `submit_codex_task`, re-authorize
+that workspace connector so it can request `execution.write`. Do not weaken or
+bypass OAuth scope checks.
+
+## Workflow: manual C2C fallback task
 
 The user must keep one ChatGPT Web conversation associated with the current
 workspace. Codex CLI must never assume it can see that browser conversation.
@@ -401,7 +425,11 @@ manually from the Plugins page.
 
 ## Security boundary
 
-C2C is read-only from ChatGPT toward the workspace. ChatGPT can read only the
-tools exposed by the bridge; it cannot edit files, run shell commands, commit,
-delete, or escape the workspace. Sensitive files remain blocked by the
-workspace policy and `.c2cignore`.
+Read tools retain the existing workspace and sensitive-file policy. Remote
+execution is a separate capability guarded by `execution.write` and mediated by
+Codex CLI; the bridge does not expose arbitrary shell, direct file-write,
+package-install, commit or push primitives. Remote Codex runs are sandboxed to
+`workspace-write`, cannot request approval escalation, have network disabled,
+and are bounded by timeout/cancellation. Treat this as materially more powerful
+than read-only MCP; high-sensitivity workspaces should use dedicated WSL,
+container or VM isolation.

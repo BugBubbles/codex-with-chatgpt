@@ -6,10 +6,11 @@ This fork adapts [XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/cod
 for users who want **Codex CLI only** and do not want to install the Codex or
 ChatGPT desktop app.
 
-The local bridge, OAuth, Cloudflare tunnel, workspace isolation and read-only
-MCP model remain intact. The difference is the control plane: instead of
-requiring an in-app browser, the user operates normal ChatGPT Web and copies
-only small structured C2C messages between ChatGPT and the terminal.
+The local bridge, OAuth, Cloudflare tunnel and workspace isolation remain intact.
+This branch now adds a narrow execution control plane on top of the existing
+read-oriented MCP data plane: ChatGPT can submit a goal to the local Codex CLI,
+query its status and cancel it without receiving a raw shell primitive.
+Manual C2C message handoff remains available as a fallback.
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md).
 
@@ -17,10 +18,12 @@ only small structured C2C messages between ChatGPT and the terminal.
 
 - No dependency on Codex Desktop or ChatGPT Desktop.
 - No `control-in-app-browser`, `agent.browsers` or Computer Use requirement.
-- Codex CLI still performs editing, shell, git and tests.
-- ChatGPT Web still reads code/diffs/test records through the read-only MCP connector.
-- The user manually handles connector setup and copies small `[C2C]` messages.
-- File bodies, diffs and logs are **not** copied through the chat control plane.
+- Codex CLI still owns editing, shell, git and tests.
+- ChatGPT Web reads code/diffs/test records through the existing read tools.
+- With the `execution.write` OAuth scope, ChatGPT may call `submit_codex_task`,
+  `codex_task_status` and `cancel_codex_task`.
+- No generic `write_file` or `execute_shell` MCP tool is exposed.
+- Manual `[C2C]` copy/paste remains a fallback when remote execution is not authorized.
 
 ## Requirements
 
@@ -89,43 +92,39 @@ Useful ChatGPT pages:
   `https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins`
 
 ## Normal workflow
+> **WSL note:** the bridge launches `codex` in the same OS environment in which
+> `c2c start` is running. If Codex CLI exists only inside WSL, start/build/run C2C
+> inside that WSL environment (the normal CLI-only setup does this). A Windows-native
+> bridge does not automatically jump into WSL. `C2C_CODEX_BIN` can override the local
+> Codex executable path when needed.
 
-The data plane stays automatic:
+
+Preferred direct workflow after authorizing `execution.write`:
 
 ```text
 ChatGPT Web
-    |
-    | read-only MCP
+    |  submit_codex_task(goal)
     v
-C2C Bridge ----> local workspace
-                    ^
-                    |
-              Codex CLI edits/tests
+C2C Bridge ----> local Codex CLI ----> workspace edits/tests
+    ^                                      |
+    | codex_task_status / execution_output |
+    +--------------- git_diff -------------+
 ```
 
-The control plane is manual and deliberately tiny:
+Remote tasks use non-interactive `codex exec` with the `workspace-write`
+sandbox, approval policy `never`, an ephemeral Codex session, and network access
+disabled. Only one remotely submitted task runs at a time. ChatGPT should review
+`git_diff` after completion rather than trusting the task result blindly.
 
-```text
-Codex CLI -> [C2C] INIT      -> paste into ChatGPT
-ChatGPT   -> [C2C] PLAN      -> paste back into Codex CLI
-Codex CLI -> execute + test
-Codex CLI -> [C2C] EXECUTED  -> paste into ChatGPT
-ChatGPT   -> PLAN or DONE    -> paste back into Codex CLI
-```
-
-Only protocol state and summaries move through copy/paste. ChatGPT reads
-actual files, git diffs and released test output directly through MCP.
+The original manual `[C2C]` INIT/PLAN/EXECUTED flow remains supported as a
+fallback for connectors that have not been re-authorized with `execution.write`.
 
 ## Why CLI-only is different
 
-The upstream Skill automates ChatGPT Web using an in-app browser. Codex CLI
-does not provide that browser surface. This fork therefore makes browser
-handoff explicit instead of pretending CLI can automate a capability it does
-not have.
-
-The tradeoff is a few manual paste actions per planning/review round. The
-benefit is that the coding side remains pure Codex CLI with no desktop-app
-dependency.
+The upstream Skill automates ChatGPT Web using an in-app browser. This fork does
+not require that browser surface. The bridge can now dispatch bounded goals to
+`codex exec` directly, while manual browser handoff remains available for setup,
+recovery and users who prefer not to grant execution scope.
 
 ## CLI commands
 
@@ -152,17 +151,19 @@ workspace's old ChatGPT connector and create it again with the new URL.
 
 ## Security model
 
-The security model remains the upstream design:
+Execution is explicit and scoped rather than a generic remote shell:
 
-- ChatGPT has no write/delete/shell/commit MCP tools.
-- Tokens are scoped to one workspace.
-- Canonical path containment blocks path escape.
-- Sensitive files such as `.env`, private keys and credentials are denied.
-- `.c2cignore` can add more exclusions.
-- The browser receives only a short-lived one-time pairing code.
-- Command output is sanitized locally before it can be exposed through
-  `execution_output`.
+- Existing read tools keep their current workspace/sensitive-file protections.
+- Remote execution requires the separate `execution.write` OAuth scope.
+- The MCP server exposes task submission/status/cancellation, not arbitrary shell,
+  direct file-write, package-install or git-commit primitives.
+- Each task runs Codex with `workspace-write`, no approval escalation and network
+  access disabled; Codex is also instructed not to commit, push or expose secrets.
+- Only one remote task may run at a time and tasks have a bounded timeout.
+- Captured Codex output still passes through the existing local sanitizer before
+  `execution_output` can return it.
 
+Existing connectors must be re-authorized once to obtain `execution.write`.
 See [docs/security.md](docs/security.md).
 
 ## Development

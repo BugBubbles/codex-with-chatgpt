@@ -95,9 +95,10 @@ describe("discovery metadata", () => {
   it("serves protected resource metadata", async () => {
     const response = await fetch(`${base}/.well-known/oauth-protected-resource/mcp`);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { resource: string; authorization_servers: string[] };
+    const body = (await response.json()) as { resource: string; authorization_servers: string[]; scopes_supported: string[] };
     expect(body.resource).toContain("/mcp");
     expect(body.authorization_servers.length).toBe(1);
+    expect(body.scopes_supported).toContain("execution.write");
   });
 
   it("serves authorization server metadata with PKCE S256", async () => {
@@ -106,6 +107,7 @@ describe("discovery metadata", () => {
     expect(body.code_challenge_methods_supported).toEqual(["S256"]);
     expect(body.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
     expect(body.registration_endpoint).toContain("/oauth/register");
+    expect(body.scopes_supported).toEqual(expect.arrayContaining(["execution.read", "execution.write"]));
   });
 });
 
@@ -232,6 +234,23 @@ describe("authorization + token flow", () => {
     expect(first.status).toBe(200);
     const second = await exchangeToken(clientId, code!, verifier);
     expect(second.status).toBe(400);
+  });
+
+  it("rejects unsupported scopes instead of falling back to full access", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("scope", "totally.unknown.scope");
+
+    const response = await fetch(authorizeUrl, { redirect: "manual" });
+    expect(response.status).toBe(302);
+    const location = response.headers.get("location") ?? "";
+    expect(location).toContain("error=invalid_scope");
   });
 
   it("requires PKCE at the authorization endpoint", async () => {

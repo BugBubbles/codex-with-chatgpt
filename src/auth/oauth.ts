@@ -76,6 +76,7 @@ function pairingPage(opts: {
     "workspace.search": "Search this workspace",
     "git.read": "Read git status and diffs",
     "execution.read": "Read Codex execution summaries",
+    "execution.write": "Run and cancel Codex tasks in this workspace",
     offline_access: "Stay connected between sessions",
   };
   const scopeList = opts.scopes
@@ -119,7 +120,7 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${escapedProductName}</h1>
-  <p class="sub">ChatGPT is requesting access to workspace <strong>${escapedWorkspaceName}</strong> (read-only):</p>
+  <p class="sub">ChatGPT is requesting scoped access to workspace <strong>${escapedWorkspaceName}</strong>:</p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
     <input type="hidden" name="request_id" value="${escapedRequestId}">
@@ -219,6 +220,14 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     }
     if (!query.code_challenge || query.code_challenge_method !== "S256") {
       fail("invalid_request", "PKCE with S256 is required");
+      return;
+    }
+    const requestedScopes = query.scope?.split(/[\s+]+/).filter(Boolean) ?? [];
+    const unsupportedScopes = requestedScopes.filter(
+      (scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope)
+    );
+    if (unsupportedScopes.length > 0) {
+      fail("invalid_scope", "One or more requested scopes are not supported");
       return;
     }
     const scopes = filterScopes(query.scope);

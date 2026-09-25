@@ -8,6 +8,7 @@ import { bearerAuth } from "../auth/middleware.js";
 import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer } from "../mcp/server.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
+import { CodexTaskManager } from "../execution/codex-tasks.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
@@ -40,6 +41,10 @@ export interface BridgeOptions {
   authStoreFile?: string;
   pairingTtlMs?: number;
   accessTokenTtlMs?: number;
+  /** Test/advanced override for the local Codex executable. */
+  codexCommand?: string;
+  /** Test/advanced argv prefix inserted before the Codex exec subcommand. */
+  codexArgsPrefix?: string[];
 }
 
 export interface Bridge {
@@ -90,6 +95,10 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
+  const taskManager = new CodexTaskManager(workspace, logger, {
+    command: opts.codexCommand,
+    argsPrefix: opts.codexArgsPrefix,
+  });
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
@@ -125,7 +134,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   // ---- MCP endpoint (bearer-protected) --------------------------------------
 
-  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger }), logger);
+  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger, taskManager }), logger);
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),
@@ -235,6 +244,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const shutdown = async (): Promise<void> => {
     if (closed) return;
     closed = true;
+    await taskManager.shutdown();
     await tunnel.stop().catch(() => undefined);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);

@@ -2,56 +2,88 @@
 
 ## Trust boundaries
 
-1. **Workspace root** is the smallest authorization boundary. One bridge serves
-   exactly one workspace; every token is bound to `workspace_id`; a token for
-   project A returns 403 on project B's bridge.
-2. **Workspace content is untrusted.** README, comments, diffs may contain
-   prompt injection. Every MCP tool description carries an explicit warning and
-   tools never grant capabilities based on file content.
-3. **The model never sees long-lived credentials.** Computer Use only ever
-   handles the one-time pairing code. Access/refresh tokens travel only inside
-   the OAuth redirect/token endpoints between ChatGPT's client and the bridge.
+1. **Workspace root** is the authorization boundary. One bridge serves exactly one
+   workspace and every OAuth token is bound to that workspace.
+2. **Workspace content is untrusted.** README text, comments, source files and diffs may
+   contain prompt injection. Read tools never grant capabilities based on file content.
+3. **Execution is separately authorized.** Read access does not imply the ability to run
+   Codex. Remote task submission and cancellation require `execution.write`.
+4. **The bridge does not expose arbitrary shell or direct file-write primitives.** The only
+   write-capable remote surface submits a bounded goal to the locally installed Codex CLI.
+5. **The model never receives long-lived bridge credentials.** OAuth access/refresh tokens
+   stay in the connector/bridge flow; pairing uses a short-lived one-time code.
 
 ## Threat model → mitigations
 
 | Threat | Mitigation |
 | --- | --- |
-| MCP URL leaks | URL alone is useless: every `/mcp` request requires a valid bearer token (401 without, 403 wrong workspace) |
-| Pairing code brute force | 8 chars from a 31-char CSPRNG alphabet (~40 bits), 5 attempts per session, per-IP rate limit (10/min), 5-minute TTL, one-time use, session destroyed on limit |
-| OAuth CSRF | `state` round-tripped verbatim; authorization requests are server-side records keyed by random ids |
-| Code interception | PKCE S256 mandatory (plain rejected); authorization codes are one-time, 5-minute TTL, bound to client + redirect URI |
-| Token theft | Opaque high-entropy tokens; stored only as SHA-256 hashes; access tokens live 1 h; refresh tokens rotate on every use (replay of the old one fails); revocation endpoint + `c2c unpair` |
-| Workspace traversal | `realpath` canonicalization of the deepest existing ancestor; containment check against the canonical root; case-insensitive comparison on macOS/Windows; rejects `..`, absolute escapes, backslash tricks, null bytes |
-| Symlink escape | Canonicalization resolves symlinks before the containment check (file and directory symlinks both covered by tests) |
-| Sensitive files | Deny-by-default patterns (.env*, keys, SSH, cloud creds, keychains…) enforced at resolve time — reads, listings, and search all pass through the same gate; `git diff` adds pathspec excludes; `.env.example` allowed |
-| Oversized file / diff DoS | read_file caps lines and bytes per response; git_diff paginates by byte offset with hard caps; search caps matches and file sizes |
-| Tunnel exposure | Bridge binds 127.0.0.1 only (refuses 0.0.0.0); the only public surface is HTTPS via the tunnel, protected by OAuth; `/health` reveals only a salted workspace hash |
-| Admin API abuse | Loopback-only + random admin token (0600 runtime file) + requests with proxy headers (`cf-connecting-ip`, `x-forwarded-for`) rejected; unauthenticated probes get 404 |
-| Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
-| Execution output leak | Codex may nominate test/build/lint logs; a local sanitizer redacts tokens, pairing-code-shaped strings and home paths, truncates size, and refuses private-key blocks entirely. Restricted items are listed without a body. ChatGPT still cannot run commands. |
-| Checkpoint / resume dump | Session checkpoints store short protocol fields only (capped). Resume uses the existing chat or HANDOFF — no new protocol state, no log paste, no re-pairing. |
+| MCP URL leaks | Every `/mcp` request requires a valid workspace-bound bearer token |
+| Pairing-code brute force | CSPRNG code, TTL, attempt limit, rate limit and one-time use |
+| OAuth CSRF / code interception | `state` round trip + PKCE S256 + one-time authorization codes |
+| Token theft | Opaque high-entropy tokens, SHA-256-at-rest hashes, expiration, refresh rotation and revocation |
+| Silent privilege escalation after upgrade | `execution.write` is a new scope; existing tokens must be re-authorized before task submission works |
+| Workspace traversal in read tools | Canonical realpath containment, symlink checks and sensitive-file policy |
+| Prompt injection in workspace content | MCP descriptions mark workspace data untrusted; the Codex worker prompt repeats this boundary and forbids following embedded instructions that conflict with the requested goal/constraints |
+| Arbitrary remote shell | No shell command string is accepted by MCP. The caller supplies only a goal plus bounded model/reasoning/timeout options |
+| Broad remote writes | Codex is started with the `workspace-write` sandbox and the workspace as cwd; direct bridge file-write tools do not exist |
+| Approval escalation | Remote `codex exec` uses `--config approval_policy="never"`; a task cannot pause and obtain broader permission interactively |
+| Network exfiltration by a remote task | `sandbox_workspace_write.network_access=false` is forced for remotely submitted tasks |
+| Concurrent workspace corruption | Only one remotely submitted Codex task may run at a time |
+| Runaway process | Remote tasks have a bounded 30–3600 second timeout and an explicit cancellation tool |
+| Git publication | Worker instructions forbid commit, push, remote changes and publishing; MCP exposes no git-commit/push primitive |
+| Execution-output leak | Captured stdout/stderr goes through the existing sanitizer; tokens/home paths are redacted, private-key blocks are withheld and output is truncated |
+| Admin API abuse | Admin surface remains loopback-only with a random admin token and rejects proxy-forwarded requests |
+| Tunnel exposure | Bridge binds loopback only; public access is only through the OAuth-protected HTTPS tunnel |
+
+## Important residual risks
+
+Remote Codex execution is materially more powerful than the original read-only design.
+`workspace-write` is a Codex sandbox boundary, not a proof that every future Codex
+version can never read host data outside the workspace. Users should keep Codex CLI
+updated and should not grant `execution.write` to connectors they do not trust.
+
+Likewise, model instructions against reading secrets or following malicious repository
+instructions are defense in depth, not a substitute for OS-level isolation. For
+high-sensitivity repositories, run the bridge/Codex worker inside a dedicated WSL
+distribution, container or VM with only the intended workspace mounted.
 
 ## Token & scope design
 
-Scopes: `workspace.read`, `workspace.search`, `git.read`, `execution.read`,
-`offline_access`. Tools enforce scopes individually (`INSUFFICIENT_SCOPE`).
-Access tokens: 1 hour. Refresh tokens: 30 days, rotated. All tokens bound to
-`workspace_id` and `client_id`.
+Scopes:
+
+- `workspace.read`
+- `workspace.search`
+- `git.read`
+- `execution.read`
+- `execution.write`
+- `offline_access`
+
+Read/status tools require their existing read scopes. `submit_codex_task` and
+`cancel_codex_task` require `execution.write`; `codex_task_status` requires
+`execution.read`.
+
+Access tokens live for one hour. Refresh tokens live for 30 days and rotate. All tokens
+are bound to `workspace_id` and `client_id`.
+
+## Remote task contract
+
+The bridge invokes the locally resolved Codex executable (or `C2C_CODEX_BIN` when the
+operator explicitly overrides it) approximately as:
+
+```text
+codex exec --json   --sandbox workspace-write   --ask-for-approval never   --skip-git-repo-check   --ephemeral   --cd <workspace>   --config sandbox_workspace_write.network_access=false   -
+```
+
+The goal is provided on stdin rather than interpolated into a shell command. Optional
+model and reasoning-effort values are passed as separate argv values and validated by the
+MCP schema.
 
 ## Storage
 
-State lives under the OS-convention app dir
-(`~/Library/Application Support/codex-with-chatgpt` on macOS), directories 0700,
-files 0600. Named-hostname preference and tunnel metadata live there too
-(`tunnels/<workspaceId>.json`) — never in the project. Only SHA-256 hashes of
-tokens are persisted — a stolen state file does not yield usable bearer tokens.
+Auth, runtime and execution metadata remain under the OS-convention state directory with
+owner-only permissions where supported. Raw OAuth tokens are not persisted. Finished
+remote task output uses the existing sanitized execution-output store.
 
-**V1 limitation**: client registrations and token hashes are file-based rather
-than OS-keychain-based. Raw tokens are never written anywhere. Keychain
-integration is a V2 item.
-
-## What ChatGPT can never do (V1)
-
-Write files, delete files, run shell commands, commit, install packages —
-these tools do not exist on the server, so no prompt injection, scope bug, or
-UI confusion can enable them.
+Task process handles are in-memory. After a bridge restart, use
+`execution_summary`/`execution_output` and git state for completed work rather than
+expecting `codex_task_status` to remember the old process.

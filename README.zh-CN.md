@@ -7,9 +7,10 @@
 
 **只安装 Codex CLI，不安装 Windows Codex 桌面版，也不依赖 ChatGPT 桌面版。**
 
-底层 C2C Bridge、OAuth、Cloudflare Tunnel、工作区隔离和只读 MCP 安全模型
-保持不变。变化的是“控制面”：原版依赖内置浏览器自动操作 ChatGPT；本分支改为
-由你在普通浏览器中操作 ChatGPT Web，只复制很短的 C2C 状态消息。
+底层 C2C Bridge、OAuth、Cloudflare Tunnel 和工作区隔离保持不变。
+本分支现在在原有“以读取为主”的 MCP 数据面之上增加一个受限执行控制面：
+ChatGPT 可以向本地 Codex CLI 提交目标、查询状态和取消任务，但不会获得裸 Shell。
+原来的人工 C2C 消息交接仍保留为兼容回退方式。
 
 ## 主要变化
 
@@ -18,9 +19,11 @@
 - 不使用 `control-in-app-browser`。
 - 不使用 `agent.browsers` 或 Computer Use。
 - Codex CLI 继续负责改代码、Shell、Git、测试。
-- ChatGPT 继续通过只读 MCP 自己读取代码、diff 和测试记录。
-- 你只需要在终端与 ChatGPT 网页之间复制少量 `[C2C]` 控制消息。
-- **不需要复制文件正文、diff 或日志。**
+- ChatGPT 继续通过现有读取工具自行读取代码、diff 和测试记录。
+- 授权 `execution.write` 后，ChatGPT 可调用 `submit_codex_task`、
+  `codex_task_status` 和 `cancel_codex_task`。
+- 不暴露通用 `write_file` 或 `execute_shell` 工具。
+- 未授权执行 scope 时，仍可使用原来的 `[C2C]` 人工复制流程。
 
 ## 环境要求
 
@@ -109,33 +112,30 @@ https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAf
 ```
 
 ## 日常使用方式
+> **WSL 注意：** Bridge 会在运行 `c2c start` 的同一操作系统环境中启动
+> `codex`。如果你的 Codex CLI 只安装在 WSL，请在该 WSL 环境中构建并启动 C2C
+>（正常的 CLI-only 流程就是如此）。Windows 原生 Bridge 不会自动跨到 WSL；必要时
+> 可用 `C2C_CODEX_BIN` 覆盖本地 Codex 可执行文件路径。
 
-数据读取仍然是自动的：
+
+重新授权 `execution.write` 后，推荐直接使用：
 
 ```text
 ChatGPT 网页
-    |
-    | 只读 MCP
+    | submit_codex_task(goal)
     v
-C2C Bridge ----> 本地工作区
-                    ^
-                    |
-              Codex CLI 修改/测试
+C2C Bridge ----> 本地 Codex CLI ----> 工作区修改/测试
+    ^                                      |
+    | codex_task_status / execution_output |
+    +--------------- git_diff -------------+
 ```
 
-只有控制消息需要人工交接：
+远程任务使用非交互 `codex exec`，固定为 `workspace-write` 沙箱、
+`approval_policy="never"`、临时会话并关闭网络访问；同一工作区同时只允许一个远程任务。
+任务结束后 ChatGPT 应继续通过 `git_diff` 独立审查结果。
 
-```text
-Codex CLI -> [C2C] INIT      -> 粘贴到 ChatGPT
-ChatGPT   -> [C2C] PLAN      -> 粘贴回 Codex CLI
-Codex CLI -> 执行修改和测试
-Codex CLI -> [C2C] EXECUTED  -> 粘贴到 ChatGPT
-ChatGPT   -> PLAN / DONE     -> 粘贴回 Codex CLI
-```
-
-这些消息通常很短，只包含任务状态、目标、测试摘要等信息。
-
-**代码内容不会通过复制粘贴来回传输。**
+原来的 INIT / PLAN / EXECUTED 人工复制流程仍保留，适用于没有授权
+`execution.write` 的旧 Connector 或作为故障回退。
 
 ChatGPT 会自己通过 MCP 调用：
 
@@ -149,21 +149,11 @@ ChatGPT 会自己通过 MCP 调用：
 - `execution_summary`
 - `execution_output`
 
-## 为什么不能做到完全无人值守
+## CLI-only 的控制方式
 
-原版项目把 ChatGPT 网页自动化建立在 Codex 的内置浏览器能力之上。
-
-Codex CLI 本身没有这套浏览器控制面，因此 CLI-only 模式如果仍然宣称可以
-自动点击 ChatGPT 页面，会形成错误依赖。
-
-本分支选择保留真正有价值的部分：
-
-**Codex CLI 自动执行 + ChatGPT MCP 自动读取**
-
-而把浏览器操作明确变成少量人工交接。
-
-代价是每轮 PLAN/REVIEW 需要复制一两次很短的 C2C 消息；好处是完全不需要安装
-Codex 桌面版。
+本分支仍然不尝试自动点击 ChatGPT 网页，也不依赖 Codex Desktop。
+不同之处是：执行控制现在可以通过受限 MCP 工具直接派发给本地 `codex exec`，
+因此正常开发回合不再必须人工搬运 PLAN。人工 C2C 消息仅作为兼容和恢复路径。
 
 ## 常用命令
 
@@ -190,15 +180,16 @@ Connector，并使用新地址重新创建同名 Connector。
 
 ## 安全模型
 
-继续沿用原项目的安全边界：
+执行能力采用独立授权和受限任务派发：
 
-- ChatGPT 侧不存在写文件、删文件、Shell、commit 类型 MCP 工具；
-- 一个 token 绑定一个 workspace；
-- realpath 校验阻止 `../`、symlink 等路径逃逸；
-- `.env`、SSH key、credentials 等敏感文件默认禁止读取；
-- `.c2cignore` 可以继续增加屏蔽规则；
-- 浏览器只会接触短期一次性配对码；
-- 测试输出通过 `execution_output` 暴露前先在本地脱敏。
+- 原有读取工具继续保留 workspace 边界、realpath 校验和敏感文件过滤；
+- 远程执行必须额外获得 `execution.write` OAuth scope；
+- 不提供裸 Shell、直接写文件、安装包或 git commit 类型 MCP 原语；
+- 每个任务由本地 Codex CLI 在 `workspace-write` 沙箱内执行，关闭网络访问；
+- 同时只允许一个远程任务，并设置超时；
+- Codex 输出仍需经过本地 sanitizer 后才能通过 `execution_output` 返回。
+
+升级已有 Connector 后需要重新授权一次，旧 token 不会自动得到执行权限。
 
 完整说明见 [docs/security.md](docs/security.md)。
 
