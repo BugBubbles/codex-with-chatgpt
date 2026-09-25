@@ -6,7 +6,7 @@ import { searchWorkspace } from "../workspace/search.js";
 import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
 import { executionRecordSchema, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import { listExecutionOutputs, readExecutionOutput } from "../execution/output.js";
-import { CodexTaskError, type CodexTaskManager } from "../execution/codex-tasks.js";
+import { executePython, PythonExecutionError, writeWorkspaceTextFile } from "../execution/python-runner.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 
@@ -180,25 +180,32 @@ const executionOutputOutputSchema = {
   text: z.string().optional().describe("Sanitized command output returned by the read operation"),
 };
 
-const codexTaskOutputSchema = {
-  taskId: z.string(),
-  status: z.enum(["running", "cancelling", "succeeded", "failed", "cancelled"]),
-  submittedAt: z.string(),
-  startedAt: z.string(),
-  finishedAt: z.string().nullable(),
+const pythonWriteFileOutputSchema = {
+  path: z.string(),
+  bytesWritten: z.number().int().nonnegative(),
+  created: z.boolean(),
+  sha256: z.string(),
+};
+
+const pythonExecuteOutputSchema = {
+  executionId: z.string(),
+  mode: z.enum(["inline", "file"]),
   exitCode: z.number().int().nullable(),
-  outputId: z.number().int().positive().nullable(),
-  error: z.string().nullable(),
+  timedOut: z.boolean(),
+  durationMs: z.number().int().nonnegative(),
+  outputId: z.number().int().positive(),
+  outputAvailable: z.boolean(),
+  output: z.string().nullable(),
+  changedFiles: z.array(z.string()),
 };
 
 export interface McpContext {
   workspace: Workspace;
   logger: Logger;
-  taskManager: CodexTaskManager;
 }
 
 export function createMcpServer(ctx: McpContext): McpServer {
-  const { workspace, taskManager } = ctx;
+  const { workspace, logger } = ctx;
   const server = new McpServer(
     { name: PRODUCT_NAME, version: VERSION },
     { capabilities: { tools: {} }, instructions: UNTRUSTED_NOTE }
@@ -383,7 +390,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Test status",
       description:
-        `Summary of the most recent test run reported by the Codex harness. This does NOT run ` +
+        `Summary of the most recent recorded execution/test result. This does NOT run ` +
         `tests; it reads the latest execution record. ${UNTRUSTED_NOTE}`,
       inputSchema: {},
       outputSchema: testStatusOutputSchema,
@@ -414,7 +421,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Execution summary",
       description:
-        `Recent Codex execution records for this workspace: task id, iteration, changed files, ` +
+        `Recent execution records for this workspace: task id, iteration, changed files, ` +
         `tests and exit status. Use it after Codex reports EXECUTED. ${UNTRUSTED_NOTE}`,
       inputSchema: {
         limit: z.number().int().min(1).max(50).default(5),
@@ -434,8 +441,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Execution output",
       description:
-        `List or read command output that Codex chose to record after a test/build/lint/typecheck ` +
-        `run. Call with action=list first, then action=read and an id. Restricted items have no ` +
+        `List or read sanitized output recorded by local execution tools after a script/test/build run. ` +
+        `Call with action=list first, then action=read and an id. Restricted items have no ` +
         `body. This does not run commands. ${UNTRUSTED_NOTE}`,
       inputSchema: {
         action: z.enum(["list", "read"]).default("list"),
@@ -485,84 +492,16 @@ export function createMcpServer(ctx: McpContext): McpServer {
   );
 
   server.registerTool(
-    "submit_codex_task",
+    "python_write_file",
     {
-      title: "Submit Codex task",
+      title: "Python workspace write",
       description:
-        "Start one non-interactive Codex CLI task in this workspace. Codex receives a goal, may edit files inside the workspace and run local tools under the workspace-write sandbox. Network access is disabled, no arbitrary shell command is accepted, and only one remote task may run at a time.",
+        "Create or fully replace one UTF-8 text file inside the connected workspace. The path is canonicalized against the workspace boundary and the sensitive-file policy. This is the direct authoring companion for python_execute and does not invoke Codex.",
       inputSchema: {
-        goal: z.string().min(1).max(12000).describe("Concrete implementation goal for Codex"),
-        model: z
-          .string()
-          .min(1)
-          .max(100)
-          .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/)
-          .optional()
-          .describe("Optional Codex model override"),
-        reasoning_effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
-        timeout_seconds: z.number().int().min(30).max(3600).default(1800),
+        path: z.string().min(1).max(2000).describe("Workspace-relative destination path"),
+        content: z.string().max(2_000_000).describe("Complete UTF-8 file content"),
       },
-      outputSchema: codexTaskOutputSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
-    },
-    async (args, extra) => {
-      const denied = requireScope(extra.authInfo, "execution.write");
-      if (denied) return denied;
-      try {
-        return okStructured(
-          taskManager.submit({
-            goal: args.goal,
-            model: args.model,
-            reasoningEffort: args.reasoning_effort,
-            timeoutSeconds: args.timeout_seconds,
-          })
-        );
-      } catch (error) {
-        if (error instanceof CodexTaskError) return fail(error.code, error.message);
-        return mapError(error);
-      }
-    }
-  );
-
-  server.registerTool(
-    "codex_task_status",
-    {
-      title: "Codex task status",
-      description:
-        "Read the state of a remote Codex task. When it finishes, inspect outputId through execution_output and independently review git_diff.",
-      inputSchema: {
-        task_id: z.string().min(1),
-      },
-      outputSchema: codexTaskOutputSchema,
-      annotations: { readOnlyHint: true },
-    },
-    async (args, extra) => {
-      const denied = requireScope(extra.authInfo, "execution.read");
-      if (denied) return denied;
-      try {
-        return okStructured(taskManager.get(args.task_id));
-      } catch (error) {
-        if (error instanceof CodexTaskError) return fail(error.code, error.message);
-        return mapError(error);
-      }
-    }
-  );
-
-  server.registerTool(
-    "cancel_codex_task",
-    {
-      title: "Cancel Codex task",
-      description:
-        "Terminate a running remote Codex task. Partial workspace edits may remain and must be reviewed with git_diff.",
-      inputSchema: {
-        task_id: z.string().min(1),
-      },
-      outputSchema: codexTaskOutputSchema,
+      outputSchema: pythonWriteFileOutputSchema,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -574,9 +513,47 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "execution.write");
       if (denied) return denied;
       try {
-        return okStructured(taskManager.cancel(args.task_id));
+        return okStructured(writeWorkspaceTextFile(workspace, args.path, args.content));
       } catch (error) {
-        if (error instanceof CodexTaskError) return fail(error.code, error.message);
+        return mapError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "python_execute",
+    {
+      title: "Execute Python",
+      description:
+        "Execute Python directly on the local bridge, with the workspace as cwd. Supply exactly one of inline code or a workspace-relative .py file path. This does not invoke Codex and is not an OS sandbox: Python runs with the bridge process user's local permissions. The bridge minimizes inherited environment variables, enforces a timeout, records git-visible changes, and sanitizes returned output.",
+      inputSchema: {
+        code: z.string().min(1).max(200_000).optional().describe("Inline Python source. Mutually exclusive with path."),
+        path: z.string().min(1).max(2000).optional().describe("Workspace-relative .py file. Mutually exclusive with code."),
+        args: z.array(z.string().max(2000)).max(50).default([]).describe("Arguments exposed through sys.argv"),
+        timeout_seconds: z.number().int().min(1).max(3600).default(120),
+      },
+      outputSchema: pythonExecuteOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "execution.write");
+      if (denied) return denied;
+      try {
+        return okStructured(
+          await executePython(workspace, logger, {
+            code: args.code,
+            path: args.path,
+            args: args.args,
+            timeoutSeconds: args.timeout_seconds,
+          })
+        );
+      } catch (error) {
+        if (error instanceof PythonExecutionError) return fail(error.code, error.message);
         return mapError(error);
       }
     }

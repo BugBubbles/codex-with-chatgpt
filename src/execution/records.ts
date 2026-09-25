@@ -4,9 +4,9 @@ import { z } from "zod";
 import { ensureDir, getStateDir } from "../config/paths.js";
 
 /**
- * Lightweight execution records written by the Codex harness after each
- * iteration (via `c2c record`). ChatGPT reads them through the
- * `execution_summary` and `test_status` MCP tools.
+ * Lightweight execution records written by local execution helpers (including
+ * the Python executor) and by the legacy manual `c2c record` command.
+ * ChatGPT reads them through the `execution_summary` and `test_status` MCP tools.
  */
 export const executionRecordSchema = z.object({
   taskId: z.string(),
