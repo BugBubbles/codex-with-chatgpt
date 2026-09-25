@@ -100,6 +100,34 @@ Handled automatically: an existing healthy bridge for the same workspace is
 reused; anything else makes the bridge pick a free port. Configuration follows
 automatically.
 
+### ChatGPT keeps checking Codex status too frequently
+Direct-mode task snapshots return `pollIntervalSeconds` and `nextPollAt`.
+ChatGPT Web should not call `codex_task_status` before `nextPollAt` while the
+task is still running, unless the user asks to cancel or there is a concrete
+reason to intervene. The default interval is 180 seconds (3 minutes).
+
+To change it for one workspace, add or edit `.c2c.json`:
+
+```json
+{
+  "pollIntervalSeconds": 180
+}
+```
+
+Values are clamped to 30–3600 seconds. Restart the bridge after changing the
+workspace configuration so the new task manager picks up the value.
+
+### Codex reports a session continuity failure
+Direct mode stores one Codex `thread_id` per workspace and resumes that same
+thread on later batches. If a resumed Codex process reports a different
+`thread.started.thread_id`, the bridge fails the task and clears the stale
+saved id instead of silently accepting context loss.
+
+Do not immediately overwrite the workspace. First inspect `git_status`,
+`git_diff` and any released `execution_output` because the failed resume may
+have left partial edits. Once those edits are understood, the next submitted
+batch creates a fresh persistent Codex thread and stores its new id.
+
 ### Reading a file returns ACCESS_DENIED_SENSITIVE_FILE
 Working as intended: `.env`, keys, credentials and anything matched by
 `.c2cignore` are never readable through ChatGPT. `.env.example` is allowed.
