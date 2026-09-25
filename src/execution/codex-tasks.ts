@@ -187,15 +187,18 @@ export class CodexTaskManager {
     const now = new Date(nowMs).toISOString();
     const timeoutSeconds = Math.max(30, Math.min(3600, input.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS));
     const expectedThreadId = this.threadId;
-    const args = [...this.argsPrefix, "exec"];
+    const args = [
+      ...this.argsPrefix,
+      "exec",
+      "--json",
+      "--config",
+      'approval_policy="never"',
+      "--skip-git-repo-check",
+    ];
 
     if (expectedThreadId) {
-      args.push("resume", expectedThreadId);
-    }
-
-    args.push("--json", "--config", 'approval_policy="never"', "--skip-git-repo-check");
-    if (expectedThreadId) {
-      // codex exec resume does not consistently accept --sandbox; config override works on resumed turns.
+      // Keep parent exec options before the resume subcommand. Some Codex options are
+      // not accepted when written after `resume`; sandbox_mode via -c remains stable.
       args.push("--config", 'sandbox_mode="workspace-write"');
     } else {
       args.push("--sandbox", "workspace-write", "--cd", this.workspace.root);
@@ -204,6 +207,9 @@ export class CodexTaskManager {
     if (input.model) args.push("--model", input.model);
     if (input.reasoningEffort) {
       args.push("--config", `model_reasoning_effort="${input.reasoningEffort}"`);
+    }
+    if (expectedThreadId) {
+      args.push("resume", expectedThreadId);
     }
     args.push("-");
 
