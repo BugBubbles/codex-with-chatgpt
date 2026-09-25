@@ -181,23 +181,38 @@ describe("workspace identity", () => {
       JSON.stringify({
         name: "Remi",
         maxIterations: 12,
+        pollIntervalSeconds: 240,
       })
     );
     const namedWs = new Workspace(named);
     expect(namedWs.name).toBe("Remi");
     expect(namedWs.projectConfig.maxIterations).toBe(12);
+    expect(namedWs.projectConfig.pollIntervalSeconds).toBe(240);
     cleanup(named);
   });
 
   it("falls back to the directory name when .c2c.json has invalid types", () => {
     const invalid = makeTmpDir("invalid-project-config");
-    write(invalid, ".c2c.json", JSON.stringify({ name: 42, maxIterations: "many" }));
+    write(invalid, ".c2c.json", JSON.stringify({ name: 42, maxIterations: "many", pollIntervalSeconds: "fast" }));
 
     const invalidWs = new Workspace(invalid);
 
     expect(invalidWs.name).toBe(path.basename(invalid));
     expect(invalidWs.projectConfig).toEqual({});
     cleanup(invalid);
+  });
+
+  it("clamps pollIntervalSeconds to the supported 30-3600 second range", () => {
+    const low = makeTmpDir("poll-low");
+    const high = makeTmpDir("poll-high");
+    write(low, ".c2c.json", JSON.stringify({ pollIntervalSeconds: 1 }));
+    write(high, ".c2c.json", JSON.stringify({ pollIntervalSeconds: 99999 }));
+
+    expect(new Workspace(low).projectConfig.pollIntervalSeconds).toBe(30);
+    expect(new Workspace(high).projectConfig.pollIntervalSeconds).toBe(3600);
+
+    cleanup(low);
+    cleanup(high);
   });
 
   it("filters invalid package script values during project detection", () => {
