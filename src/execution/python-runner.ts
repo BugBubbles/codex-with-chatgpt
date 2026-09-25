@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { PYTHON_SANDBOX_BOOTSTRAP } from "./python-sandbox-script.js";
 import type { Logger } from "../logger/index.js";
 import { gitStatus } from "../workspace/git.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
@@ -13,7 +14,7 @@ const MAX_WRITE_BYTES = 2 * 1024 * 1024;
 
 export class PythonExecutionError extends Error {
   constructor(
-    readonly code: "INVALID_ARGUMENTS" | "PYTHON_SPAWN_FAILED",
+    readonly code: "INVALID_ARGUMENTS" | "PYTHON_SPAWN_FAILED" | "PYTHON_SANDBOX_FAILED",
     message: string
   ) {
     super(message);
@@ -28,6 +29,16 @@ export interface PythonExecuteInput {
   timeoutSeconds?: number;
 }
 
+export interface PythonSandboxInfo {
+  enforced: true;
+  backend: "landlock+seccomp";
+  landlockAbi: number;
+  noNewPrivs: true;
+  network: "blocked";
+  externalExec: "blocked";
+  limits: Record<string, number>;
+}
+
 export interface PythonExecuteResult {
   executionId: string;
   mode: "inline" | "file";
@@ -37,6 +48,7 @@ export interface PythonExecuteResult {
   outputId: number;
   outputAvailable: boolean;
   output: string | null;
+  sandbox: PythonSandboxInfo;
   changedFiles: string[];
 }
 
@@ -51,32 +63,37 @@ function pythonCommand(): string {
   return process.env.C2C_PYTHON_BIN?.trim() || (process.platform === "win32" ? "python" : "python3");
 }
 
-function childEnvironment(): NodeJS.ProcessEnv {
-  const allowed = [
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SYSTEMROOT",
-    "WINDIR",
-    "PATHEXT",
-    "VIRTUAL_ENV",
-  ] as const;
+function childEnvironment(
+  workspaceRoot: string,
+  sandboxTmp: string,
+  timeoutSeconds: number
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const key of allowed) {
+  for (const key of ["PATH", "LANG", "LC_ALL", "LC_CTYPE"] as const) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
+  env.HOME = sandboxTmp;
+  env.TMPDIR = sandboxTmp;
+  env.TMP = sandboxTmp;
+  env.TEMP = sandboxTmp;
   env.PYTHONUNBUFFERED = "1";
   env.PYTHONDONTWRITEBYTECODE = "1";
   env.PYTHONNOUSERSITE = "1";
   env.C2C_PYTHON_EXEC = "1";
+  env.C2C_SANDBOX_WORKSPACE = workspaceRoot;
+  env.C2C_SANDBOX_TMP = sandboxTmp;
+  env.C2C_SANDBOX_TIMEOUT_SECONDS = String(timeoutSeconds);
+
+  for (const key of [
+    "C2C_SANDBOX_MEMORY_BYTES",
+    "C2C_SANDBOX_FILE_BYTES",
+    "C2C_SANDBOX_OPEN_FILES",
+    "C2C_SANDBOX_EXTRA_PROCESSES",
+  ] as const) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
   return env;
 }
 
@@ -98,6 +115,60 @@ function appendCaptured(current: string, chunk: unknown): string {
   const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk ?? "");
   const next = current + text;
   return next.length > MAX_CAPTURED_CHARS ? next.slice(-MAX_CAPTURED_CHARS) : next;
+}
+
+function makeSandboxTemp(workspace: Workspace): string {
+  const dir = fs.mkdtempSync(path.join(workspace.root, ".c2c-python-sandbox-"));
+  try {
+    fs.chmodSync(dir, 0o700);
+  } catch {
+    // Best effort; mkdtemp already uses the process umask.
+  }
+  return dir;
+}
+
+function removeSandboxTemp(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best effort cleanup after the sandboxed process exits.
+  }
+}
+
+function parseSandboxInfo(raw: string): PythonSandboxInfo | null {
+  const lines = raw.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length === 0) return null;
+  try {
+    const value = JSON.parse(lines[lines.length - 1]) as Partial<PythonSandboxInfo>;
+    if (
+      value.enforced !== true ||
+      value.backend !== "landlock+seccomp" ||
+      typeof value.landlockAbi !== "number" ||
+      value.landlockAbi < 4 ||
+      value.noNewPrivs !== true ||
+      value.network !== "blocked" ||
+      value.externalExec !== "blocked" ||
+      !value.limits ||
+      typeof value.limits !== "object"
+    ) {
+      return null;
+    }
+    const limits: Record<string, number> = {};
+    for (const [key, item] of Object.entries(value.limits)) {
+      if (typeof item === "number" && Number.isFinite(item) && item >= 0) limits[key] = item;
+    }
+    return {
+      enforced: true,
+      backend: "landlock+seccomp",
+      landlockAbi: value.landlockAbi,
+      noNewPrivs: true,
+      network: "blocked",
+      externalExec: "blocked",
+      limits,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function killProcessTree(child: ChildProcess): void {
@@ -174,13 +245,15 @@ export async function executePython(
   const command = pythonCommand();
   const extraArgs = input.args ?? [];
   let mode: "inline" | "file";
-  let argv: string[];
+  let target: string;
   let commandLabel: string;
+  let inlineSource = "";
 
   if (hasCode) {
     mode = "inline";
-    argv = ["-B", "-u", "-c", input.code!, ...extraArgs];
-    commandLabel = `${command} -B -u -c <inline-python>`;
+    target = "-";
+    inlineSource = input.code!;
+    commandLabel = `${command} <strict-sandbox> -c <inline-python>`;
   } else {
     const resolved = workspace.resolve(input.path!);
     if (path.extname(resolved.rel).toLowerCase() !== ".py") {
@@ -194,12 +267,24 @@ export async function executePython(
     }
     if (!stat.isFile()) throw new WorkspaceError("NOT_A_FILE", `Not a regular file: ${resolved.rel}`);
     mode = "file";
-    argv = ["-B", "-u", resolved.abs, ...extraArgs];
-    commandLabel = `${command} -B -u ${resolved.rel}`;
+    target = resolved.abs;
+    commandLabel = `${command} <strict-sandbox> ${resolved.rel}`;
   }
 
   const executionId = `py_exec_${randomBytes(8).toString("hex")}`;
-  const timeoutSeconds = Math.max(1, Math.min(3600, Math.floor(input.timeoutSeconds ?? 120)));
+  const timeoutSeconds = Math.max(1, Math.min(300, Math.floor(input.timeoutSeconds ?? 120)));
+  const sandboxTemp = makeSandboxTemp(workspace);
+  const argv = [
+    "-I",
+    "-S",
+    "-B",
+    "-u",
+    "-c",
+    PYTHON_SANDBOX_BOOTSTRAP,
+    mode,
+    target,
+    ...extraArgs,
+  ];
   const startedAt = Date.now();
 
   return await new Promise<PythonExecuteResult>((resolve, reject) => {
@@ -207,12 +292,13 @@ export async function executePython(
     try {
       child = spawn(command, argv, {
         cwd: workspace.root,
-        env: childEnvironment(),
-        stdio: ["ignore", "pipe", "pipe"],
+        env: childEnvironment(workspace.root, sandboxTemp, timeoutSeconds),
+        stdio: ["pipe", "pipe", "pipe", "pipe"],
         windowsHide: true,
         detached: process.platform !== "win32",
       });
     } catch (error) {
+      removeSandboxTemp(sandboxTemp);
       reject(
         new PythonExecutionError(
           "PYTHON_SPAWN_FAILED",
@@ -224,6 +310,7 @@ export async function executePython(
 
     let stdout = "";
     let stderr = "";
+    let sandboxStatus = "";
     let timedOut = false;
     let settled = false;
 
@@ -233,6 +320,14 @@ export async function executePython(
     child.stderr?.on("data", (chunk) => {
       stderr = appendCaptured(stderr, chunk);
     });
+    const statusStream = child.stdio[3] as NodeJS.ReadableStream | null;
+    statusStream?.on("data", (chunk) => {
+      sandboxStatus = appendCaptured(sandboxStatus, chunk);
+    });
+    child.stdin?.on("error", () => {
+      // The bootstrap may fail before consuming all inline source.
+    });
+    child.stdin?.end(mode === "inline" ? inlineSource : "");
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -244,6 +339,7 @@ export async function executePython(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      removeSandboxTemp(sandboxTemp);
       reject(new PythonExecutionError("PYTHON_SPAWN_FAILED", error.message));
     });
 
@@ -252,6 +348,22 @@ export async function executePython(
       settled = true;
       clearTimeout(timer);
 
+      const sandbox = parseSandboxInfo(sandboxStatus);
+      if (!sandbox) {
+        removeSandboxTemp(sandboxTemp);
+        const detail = stderr.trim().split(/\r?\n/).slice(-3).join(" | ");
+        reject(
+          new PythonExecutionError(
+            "PYTHON_SANDBOX_FAILED",
+            detail
+              ? `Strict Python sandbox failed before user code ran: ${detail}`
+              : `Strict Python sandbox failed before user code ran (exit ${code ?? "null"}).`
+          )
+        );
+        return;
+      }
+
+      removeSandboxTemp(sandboxTemp);
       const durationMs = Date.now() - startedAt;
       const rawParts: string[] = [];
       if (stdout) rawParts.push(`[stdout]\n${stdout}`);
@@ -276,8 +388,8 @@ export async function executePython(
         exitStatus: timedOut ? "timeout" : code === 0 ? "ok" : "failed",
         timestamp: new Date().toISOString(),
         notes: timedOut
-          ? `Python execution timed out after ${timeoutSeconds} seconds.`
-          : `Python ${mode} execution completed.`,
+          ? `Sandboxed Python execution timed out after ${timeoutSeconds} seconds.`
+          : `Sandboxed Python ${mode} execution completed.`,
         outputId: output.id,
         outputAvailable: output.allowed,
       });
@@ -292,10 +404,11 @@ export async function executePython(
         outputId: output.id,
         outputAvailable: output.allowed,
         output: readable?.ok ? readable.text : null,
+        sandbox,
         changedFiles: files,
       };
       logger.info(
-        `Python execution ${executionId} finished: mode=${mode} exit=${code ?? "null"} timedOut=${timedOut}`
+        `Python execution ${executionId} finished: mode=${mode} exit=${code ?? "null"} timedOut=${timedOut} sandbox=landlock+seccomp`
       );
       resolve(result);
     });
