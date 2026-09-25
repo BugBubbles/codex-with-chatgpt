@@ -392,7 +392,7 @@ describe("MCP tools over Streamable HTTP", () => {
   });
 
   it("submits a Codex task, observes completion, and exposes sanitized output", async () => {
-    const submitted = structuredJsonOf<{ taskId: string; status: string }>(
+    const submitted = structuredJsonOf<{ taskId: string; status: string; pollIntervalSeconds: number; nextPollAt: string | null }>(
       await client.callTool({
         name: "submit_codex_task",
         arguments: { execution_brief: executionBrief("Create remote-task.txt for the integration test") },
@@ -429,7 +429,7 @@ describe("MCP tools over Streamable HTTP", () => {
   });
 
   it("cancels a running Codex task", async () => {
-    const submitted = structuredJsonOf<{ taskId: string }>(
+    const submitted = structuredJsonOf<{ taskId: string; threadId: string | null }>(
       await client.callTool({
         name: "submit_codex_task",
         arguments: {
