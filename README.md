@@ -1,8 +1,8 @@
-# Codex with ChatGPT — strict Python sandbox branch
+# Codex with ChatGPT — Python branch
 
 > ChatGPT reasons and writes Python; the local bridge executes it inside a fail-closed Linux sandbox.
 
-The `python-sandbox` branch is derived from `python`. It keeps the workspace/OAuth/tunnel/read tooling and direct Python authoring surface, but replaces host-permission Python execution with a strict non-root sandbox based on Linux Landlock, seccomp, `no_new_privs`, resource limits, and a scrubbed environment.
+The `python` branch provides the workspace/OAuth/tunnel/read tooling and direct Python authoring surface, with Python execution confined by a strict non-root sandbox based on Linux Landlock, seccomp, `no_new_privs`, resource limits, and a scrubbed environment.
 
 ## MCP tools
 
@@ -22,7 +22,7 @@ Read/status tools remain available:
 Write/execute tools, gated by the existing `execution.write` OAuth scope:
 
 - `python_write_file(path, content)` — atomically create or fully replace one UTF-8 text file inside the workspace, retaining canonical-path, symlink-escape and sensitive-file checks.
-- `python_execute(code | path, args?, environment?, timeout_seconds?)` — run inline Python or one workspace-relative `.py` file only after the strict sandbox handshake succeeds. `environment` must be an exact id returned by `conda_environments`.
+- `python_execute(code | path, args?, environment?, timeout_seconds?)` — run inline Python or one workspace-relative `.py` file only after the strict sandbox handshake succeeds. `environment` must be an exact id returned by `conda_environments`. `changedFiles` reports only git-visible paths whose state changed during that execution, not pre-existing dirty files that were merely present.
 
 The branch does **not** expose `submit_codex_task`, `codex_task_status`, or `cancel_codex_task`.
 
@@ -44,7 +44,7 @@ The Python interpreter defaults to `python3`. Set `C2C_PYTHON_BIN=/absolute/path
 ```bash
 git clone https://github.com/BugBubbles/codex-with-chatgpt.git
 cd codex-with-chatgpt
-git checkout python-sandbox
+git checkout python
 corepack pnpm install
 corepack pnpm build
 c2c start -w <workspace> --tunnel
