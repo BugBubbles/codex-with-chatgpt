@@ -112,7 +112,7 @@ describe("read-only Conda environment selection", () => {
         "prefix = os.environ.get('CONDA_PREFIX', '')",
         "print('RUNTIME_MATCH', os.path.commonpath([prefix, os.path.realpath(sys.executable)]) == prefix)",
         "try:",
-        "    Path(sys.prefix, 'c2c-mutation-test').write_text('no', encoding='utf-8')",
+        "    Path(prefix, 'c2c-mutation-test').write_text('no', encoding='utf-8')",
         "    print('ENV_WRITE_ESCAPE')",
         "except OSError as exc:",
         "    print('ENV_WRITE_DENIED', type(exc).__name__, exc.errno)",
