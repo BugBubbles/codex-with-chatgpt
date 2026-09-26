@@ -1,8 +1,8 @@
-# Codex with ChatGPT — 严格 Python 沙箱分支
+# Codex with ChatGPT — Python 分支
 
 > ChatGPT 负责分析并生成 Python，本地 Bridge 只在严格、失败即关闭（fail-closed）的 Linux 沙箱中执行。
 
-`python-sandbox` 分支基于 `python` 分支。它保留 OAuth、Tunnel、workspace 读取/Git 工具和直接 Python 写入能力，但把原先继承本地用户权限的 `python_execute` 改为 Landlock + seccomp + `no_new_privs` + rlimit 的非 root 沙箱。
+`python` 分支保留 OAuth、Tunnel、workspace 读取/Git 工具和直接 Python 写入能力，并将 `python_execute` 限制在 Landlock + seccomp + `no_new_privs` + rlimit 的非 root 严格沙箱中。
 
 ## MCP 工具
 
@@ -22,7 +22,7 @@
 拥有 `execution.write` scope 后：
 
 - `python_write_file(path, content)`：继续使用 workspace canonical path、symlink escape 和敏感文件检查，原子写入 UTF-8 文本。
-- `python_execute(code | path, args?, environment?, timeout_seconds?)`：只有严格沙箱全部安装成功后才执行内联 Python 或 workspace 内的 `.py` 文件；`environment` 必须是 `conda_environments` 返回的精确环境 ID。
+- `python_execute(code | path, args?, environment?, timeout_seconds?)`：只有严格沙箱全部安装成功后才执行内联 Python 或 workspace 内的 `.py` 文件；`environment` 必须是 `conda_environments` 返回的精确环境 ID。返回的 `changedFiles` 只记录本次执行期间实际发生状态变化的 Git 可见路径，不会把执行前已有但本次未触碰的 dirty 文件算进去。
 
 本分支仍不暴露 `submit_codex_task`、`codex_task_status`、`cancel_codex_task`。
 
@@ -44,7 +44,7 @@
 ```bash
 git clone https://github.com/BugBubbles/codex-with-chatgpt.git
 cd codex-with-chatgpt
-git checkout python-sandbox
+git checkout python
 corepack pnpm install
 corepack pnpm build
 c2c start -w <workspace> --tunnel
