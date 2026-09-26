@@ -1,4 +1,4 @@
-# Security Model — python-sandbox branch
+# Security Model — python branch
 
 ## Goal
 
@@ -133,7 +133,7 @@ There is no configuration switch that silently falls back to the old host-permis
 
 ## Output and records
 
-stdout/stderr still pass through the existing execution-output sanitizer. Known tokens and home paths are redacted, private-key-shaped output is withheld, and stored output is truncated. Execution records continue to capture id, exit state, git-visible workspace changes and output id.
+stdout/stderr still pass through the existing execution-output sanitizer. Known tokens and home paths are redacted, private-key-shaped output is withheld, and stored output is truncated. Execution records capture id, exit state, output id, and only git-visible workspace paths whose status/filesystem fingerprint changed between the start and end of that execution. Pre-existing dirty files that remain untouched are not attributed to the execution.
 
 ## Residual risks
 
