@@ -51,8 +51,13 @@ if runtime_prefix:
         overlaps_workspace = True
     if overlaps_workspace:
         fail("selected Conda runtime overlaps the writable workspace")
-    if os.path.realpath(sys.prefix) != runtime_prefix:
-        fail("selected Conda interpreter prefix does not match the requested environment")
+    runtime_executable = os.path.realpath(sys.executable)
+    try:
+        executable_inside_prefix = os.path.commonpath([runtime_prefix, runtime_executable]) == runtime_prefix
+    except ValueError:
+        executable_inside_prefix = False
+    if not executable_inside_prefix:
+        fail("selected Conda interpreter executable is outside the requested environment")
 
 if len(sys.argv) < 3:
     fail("sandbox bootstrap arguments are incomplete")
@@ -141,6 +146,24 @@ try:
             site_paths.append(os.path.realpath(item))
 except Exception:
     pass
+
+# With -S, some Python builds (notably venv-style layouts used by tests) do
+# not derive sys.prefix/site-packages from the executable prefix. For a
+# selected Conda runtime, discover its conventional site-packages directories
+# explicitly without executing activation hooks.
+if runtime_prefix:
+    runtime_lib = os.path.join(runtime_prefix, "lib")
+    try:
+        for child in os.listdir(runtime_lib):
+            candidate = os.path.join(runtime_lib, child, "site-packages")
+            if child.startswith("python") and os.path.isdir(candidate):
+                site_paths.append(os.path.realpath(candidate))
+    except OSError:
+        pass
+    windows_site = os.path.join(runtime_prefix, "Lib", "site-packages")
+    if os.path.isdir(windows_site):
+        site_paths.append(os.path.realpath(windows_site))
+    site_paths = list(dict.fromkeys(site_paths))
 
 mapped_runtime_dirs = set()
 try:
