@@ -6,13 +6,11 @@ on:
       - main
       - cli-only
       - python
-      - python-sandbox
   push:
     branches:
       - main
       - cli-only
       - python
-      - python-sandbox
 
 permissions:
   contents: read
