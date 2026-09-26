@@ -80,6 +80,7 @@ describe("MCP tools over Streamable HTTP", () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
+      "conda_environments",
       "execution_output",
       "execution_summary",
       "git_diff",
@@ -108,8 +109,9 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
     expectToolOutputSchema(tools, "execution_summary", ["records"]);
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
+    expectToolOutputSchema(tools, "conda_environments", ["environments"]);
     expectToolOutputSchema(tools, "python_write_file", ["path", "bytesWritten", "created", "sha256"]);
-    expectToolOutputSchema(tools, "python_execute", ["executionId", "mode", "exitCode", "timedOut", "outputId", "outputAvailable", "output", "changedFiles"]);
+    expectToolOutputSchema(tools, "python_execute", ["executionId", "mode", "exitCode", "timedOut", "outputId", "outputAvailable", "output", "sandbox", "environment", "changedFiles"]);
   });
 
   it("documents git_diff pagination with its output field names", async () => {
@@ -303,6 +305,12 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(textOf(missing)).toContain("NOT_FOUND");
   });
 
+  it("lists Conda environments through a read-only execution scope", async () => {
+    const result = await client.callTool({ name: "conda_environments", arguments: {} });
+    const body = structuredJsonOf<{ environments: unknown[] }>(result);
+    expect(Array.isArray(body.environments)).toBe(true);
+  });
+
   it("writes a workspace file directly without Codex", async () => {
     const result = structuredJsonOf<{ path: string; bytesWritten: number; created: boolean; sha256: string }>(
       await client.callTool({
@@ -403,6 +411,9 @@ describe("MCP tools over Streamable HTTP", () => {
     });
     expect(outputDenied.isError).toBe(true);
     expect(textOf(outputDenied)).toContain("INSUFFICIENT_SCOPE");
+    const condaDenied = await limitedClient.callTool({ name: "conda_environments", arguments: {} });
+    expect(condaDenied.isError).toBe(true);
+    expect(textOf(condaDenied)).toContain("INSUFFICIENT_SCOPE");
     const executeDenied = await limitedClient.callTool({
       name: "python_execute",
       arguments: { code: "print('must not run')" },
