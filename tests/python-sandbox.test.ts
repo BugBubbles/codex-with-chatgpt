@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { executePython, pythonThreadPlan } from "../src/execution/python-runner.js";
@@ -52,6 +53,35 @@ describe("strict Python sandbox", () => {
     });
     expect(result.sandbox.landlockAbi).toBeGreaterThanOrEqual(4);
     expect(result.sandbox.limits.openFiles).toBeLessThanOrEqual(128);
+  });
+
+  sandboxIt("reports only paths changed by the current execution", async () => {
+    fs.writeFileSync(path.join(root, "hello.txt"), "dirty before execution\n", "utf8");
+    write(root, "preexisting-untracked/old.txt", "old\n");
+
+    const untouched = await executePython(workspace, nullLogger, {
+      code: "print('NO_WORKSPACE_WRITE')",
+      timeoutSeconds: 30,
+    });
+    expect(untouched.exitCode).toBe(0);
+    expect(untouched.changedFiles).toEqual([]);
+
+    const changed = await executePython(workspace, nullLogger, {
+      code: [
+        "from pathlib import Path",
+        "Path('hello.txt').write_text('changed by execution\\n', encoding='utf-8')",
+        "Path('preexisting-untracked/new.txt').write_text('new\\n', encoding='utf-8')",
+      ].join("\n"),
+      timeoutSeconds: 30,
+    });
+
+    expect(changed.exitCode).toBe(0);
+    expect(changed.changedFiles).toEqual([
+      "hello.txt",
+      "preexisting-untracked/new.txt",
+    ]);
+    expect(changed.changedFiles).not.toContain("sandbox-created.txt");
+    expect(changed.changedFiles).not.toContain("preexisting-untracked/old.txt");
   });
 
   sandboxIt("auto-sizes numeric thread pools within the sandbox task budget", async () => {
