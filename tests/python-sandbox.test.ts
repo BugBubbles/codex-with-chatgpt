@@ -1,6 +1,6 @@
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { executePython } from "../src/execution/python-runner.js";
+import { executePython, pythonThreadPlan } from "../src/execution/python-runner.js";
 import { nullLogger } from "../src/logger/index.js";
 import { Workspace } from "../src/workspace/manager.js";
 import { cleanup, isolateStateDir, makeGitRepo, makeTmpDir, write } from "./helpers.js";
@@ -52,6 +52,49 @@ describe("strict Python sandbox", () => {
     });
     expect(result.sandbox.landlockAbi).toBeGreaterThanOrEqual(4);
     expect(result.sandbox.limits.openFiles).toBeLessThanOrEqual(128);
+  });
+
+  sandboxIt("auto-sizes numeric thread pools within the sandbox task budget", async () => {
+    const plan = pythonThreadPlan();
+    expect(plan.systemLogical).toBeGreaterThanOrEqual(1);
+    expect(plan.available).toBeGreaterThanOrEqual(1);
+    expect(plan.available).toBeLessThanOrEqual(plan.systemLogical);
+    expect(plan.compute).toBeGreaterThanOrEqual(1);
+    expect(plan.compute).toBeLessThanOrEqual(plan.available);
+    expect(plan.compute).toBeLessThanOrEqual(16);
+
+    const result = await executePython(workspace, nullLogger, {
+      code: [
+        "import os",
+        "import threading",
+        "keys = ['OPENBLAS_NUM_THREADS','GOTO_NUM_THREADS','OMP_NUM_THREADS','OMP_THREAD_LIMIT','MKL_NUM_THREADS','VECLIB_MAXIMUM_THREADS','BLIS_NUM_THREADS','NUMEXPR_NUM_THREADS','NUMEXPR_MAX_THREADS']",
+        "values = {key: os.environ.get(key) for key in keys}",
+        "print('THREAD_ENV', values)",
+        "n = int(os.environ['OMP_NUM_THREADS'])",
+        "workers = [threading.Thread(target=lambda: None) for _ in range(n)]",
+        "[worker.start() for worker in workers]",
+        "[worker.join() for worker in workers]",
+        "print('THREADS_STARTED', n)",
+      ].join("\n"),
+      timeoutSeconds: 30,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.sandbox.threads).toEqual(plan);
+    expect(result.output).toContain(`THREADS_STARTED ${plan.compute}`);
+    for (const key of [
+      "OPENBLAS_NUM_THREADS",
+      "GOTO_NUM_THREADS",
+      "OMP_NUM_THREADS",
+      "OMP_THREAD_LIMIT",
+      "MKL_NUM_THREADS",
+      "VECLIB_MAXIMUM_THREADS",
+      "BLIS_NUM_THREADS",
+      "NUMEXPR_NUM_THREADS",
+      "NUMEXPR_MAX_THREADS",
+    ]) {
+      expect(result.output).toContain(`'${key}': '${plan.compute}'`);
+    }
   });
 
   sandboxIt("denies reads outside the connected workspace", async () => {
