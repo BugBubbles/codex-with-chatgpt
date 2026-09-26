@@ -17,7 +17,8 @@ C2C Bridge (normal user authority)
            | spawn selected python -I -S with reduced bootstrap env
            v
        Sandbox bootstrap
-           |-- rlimit
+           |-- host/affinity-aware numeric thread plan
+           |-- rlimit (UID task-count baseline)
            |-- PR_SET_NO_NEW_PRIVS
            |-- Landlock ABI 4+ filesystem/TCP policy
            |-- seccomp syscall filter
@@ -50,7 +51,7 @@ C2C Bridge (normal user authority)
 3. The bridge canonicalizes file targets through `Workspace.resolve`.
 4. A private per-execution temp directory is created under the workspace.
 5. Python starts with `-I -S`; inline source is sent over stdin and is not executed yet.
-6. The bootstrap verifies the selected runtime prefix (if any), then applies rlimits, `no_new_privs`, Landlock and seccomp.
+6. The bridge supplies the host logical/available CPU counts and a bounded numeric worker count; the bootstrap counts the current UID's Linux tasks, applies rlimits, then installs `no_new_privs`, Landlock and seccomp.
 7. The bootstrap replaces its environment and narrows `sys.path`.
 8. A JSON sandbox status is written to a dedicated inherited fd and that fd is closed.
 9. Only then is the inline source compiled/executed or the workspace file run via `runpy`.
