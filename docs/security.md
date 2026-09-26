@@ -90,7 +90,7 @@ Tokens, SSH agent sockets, cloud credentials, proxy credentials and arbitrary br
 
 `conda_environments` is intentionally read-only. Discovery uses filesystem metadata (`conda-meta`, the user's Conda registry file, known roots, and optional operator-provided `C2C_CONDA_ROOTS`) and executable presence. It does **not** run `conda`, `mamba`, activation hooks, or environment binaries.
 
-`python_execute(environment=<id>)` accepts only an exact opaque id from the current discovery result. Arbitrary interpreter paths and environment names are not accepted. The selected environment's Python is launched directly with `-I -S`; before user code runs, the bootstrap verifies that `sys.prefix` matches the selected prefix and adds that prefix to Landlock with read-only rights.
+`python_execute(environment=<id>)` accepts only an exact opaque id from the current discovery result. Arbitrary interpreter paths and environment names are not accepted. The selected environment's Python is launched directly with `-I -S`; before user code runs, the bootstrap verifies that the actual `sys.executable` resides inside the selected prefix and adds that prefix to Landlock with read-only rights.
 
 This permits imports from the selected environment, including native shared libraries. Environment `.pth` processing occurs only after Landlock/seccomp are active. Conda activation scripts are not executed, and external process execution remains blocked, so environment binaries, `conda`, `mamba`, and `pip` CLI cannot be launched from model-authored Python. Network access also remains blocked.
 
