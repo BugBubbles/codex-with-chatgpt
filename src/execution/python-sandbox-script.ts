@@ -33,8 +33,26 @@ if not workspace or not sandbox_tmp:
 
 workspace = os.path.realpath(workspace)
 sandbox_tmp = os.path.realpath(sandbox_tmp)
+runtime_prefix = os.environ.get("C2C_SANDBOX_RUNTIME_PREFIX", "").strip()
+runtime_name = os.environ.get("C2C_SANDBOX_RUNTIME_NAME", "").strip()
+if runtime_prefix:
+    runtime_prefix = os.path.realpath(runtime_prefix)
 if not os.path.isdir(workspace) or not os.path.isdir(sandbox_tmp):
     fail("sandbox workspace/temp directory is unavailable")
+if runtime_prefix:
+    if not os.path.isdir(runtime_prefix):
+        fail("selected Conda runtime prefix is unavailable")
+    try:
+        overlaps_workspace = (
+            os.path.commonpath([workspace, runtime_prefix]) == workspace
+            or os.path.commonpath([runtime_prefix, workspace]) == runtime_prefix
+        )
+    except ValueError:
+        overlaps_workspace = True
+    if overlaps_workspace:
+        fail("selected Conda runtime overlaps the writable workspace")
+    if os.path.realpath(sys.prefix) != runtime_prefix:
+        fail("selected Conda interpreter prefix does not match the requested environment")
 
 if len(sys.argv) < 3:
     fail("sandbox bootstrap arguments are incomplete")
@@ -288,6 +306,9 @@ for candidate in (
     if os.path.exists(candidate):
         read_paths.add(os.path.realpath(candidate))
 
+if runtime_prefix:
+    read_paths.add(runtime_prefix)
+
 for candidate in sorted(read_paths):
     add_path_rule(candidate, FS_READ)
 
@@ -386,7 +407,13 @@ clean_env = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONNOUSERSITE": "1",
     "C2C_PYTHON_EXEC": "1",
+    "PIP_NO_INDEX": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
 }
+if runtime_prefix:
+    clean_env["CONDA_PREFIX"] = runtime_prefix
+    clean_env["CONDA_DEFAULT_ENV"] = runtime_name or os.path.basename(runtime_prefix)
+    clean_env["CONDA_SHLVL"] = "1"
 for key in ("LANG", "LC_ALL", "LC_CTYPE"):
     value = os.environ.get(key)
     if value:
@@ -407,6 +434,18 @@ for item in [*sys.path, *site_paths]:
     if item and item not in runtime_path:
         runtime_path.append(item)
 sys.path[:] = runtime_path
+
+# Selected Conda environments may rely on .pth files in site-packages. Process
+# them only after Landlock/seccomp are active, so any executable .pth statement
+# remains confined by the same sandbox as user code.
+if runtime_prefix:
+    try:
+        import site as _site
+        for item in site_paths:
+            if item and os.path.isdir(item):
+                _site.addsitedir(item)
+    except Exception as exc:
+        fail("selected Conda site-packages initialization failed: " + repr(exc))
 
 status = {
     "enforced": True,
