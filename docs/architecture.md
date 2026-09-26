@@ -1,4 +1,4 @@
-# Architecture — python-sandbox branch
+# Architecture — python branch
 
 ```text
 ChatGPT Web
@@ -56,7 +56,7 @@ C2C Bridge (normal user authority)
 8. A JSON sandbox status is written to a dedicated inherited fd and that fd is closed.
 9. Only then is the inline source compiled/executed or the workspace file run via `runpy`.
 10. The Node parent enforces wall timeout and kills the process group if necessary.
-11. The private temp directory is removed, output is sanitized/stored, and git-visible changes are recorded.
+11. The private temp directory is removed, output is sanitized/stored, and git-visible per-execution changes are computed by comparing pre/post dirty-path snapshots; untouched pre-existing dirty files are excluded.
 12. `python_execute` returns the sandbox attestation alongside the normal execution result.
 
 If sandbox setup fails, no user Python runs and the tool returns `PYTHON_SANDBOX_FAILED`.
