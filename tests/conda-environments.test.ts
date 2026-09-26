@@ -109,7 +109,8 @@ describe("read-only Conda environment selection", () => {
         "from pathlib import Path",
         "import c2c_conda_marker",
         "print('MARKER', c2c_conda_marker.VALUE)",
-        "print('PREFIX_MATCH', os.environ.get('CONDA_PREFIX') == sys.prefix)",
+        "prefix = os.environ.get('CONDA_PREFIX', '')",
+        "print('RUNTIME_MATCH', os.path.commonpath([prefix, os.path.realpath(sys.executable)]) == prefix)",
         "try:",
         "    Path(sys.prefix, 'c2c-mutation-test').write_text('no', encoding='utf-8')",
         "    print('ENV_WRITE_ESCAPE')",
@@ -122,7 +123,7 @@ describe("read-only Conda environment selection", () => {
     expect(result.exitCode).toBe(0);
     expect(result.environment?.id).toBe(environment.id);
     expect(result.output).toContain("MARKER CONDA_LIBRARY_OK");
-    expect(result.output).toContain("PREFIX_MATCH True");
+    expect(result.output).toContain("RUNTIME_MATCH True");
     expect(result.output).toContain("ENV_WRITE_DENIED");
     expect(result.output).not.toContain("ENV_WRITE_ESCAPE");
     expect(fs.existsSync(path.join(envPrefix, "c2c-mutation-test"))).toBe(false);
