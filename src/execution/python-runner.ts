@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { PYTHON_SANDBOX_BOOTSTRAP } from "./python-sandbox-script.js";
 import {
@@ -16,6 +17,42 @@ import { readExecutionOutput, saveExecutionOutput } from "./output.js";
 
 const MAX_CAPTURED_CHARS = 2_000_000;
 const MAX_WRITE_BYTES = 2 * 1024 * 1024;
+const DEFAULT_EXTRA_PROCESS_BUDGET = 32;
+const MAX_NUMERIC_THREADS = 16;
+
+export interface PythonThreadPlan {
+  systemLogical: number;
+  available: number;
+  compute: number;
+}
+
+function boundedInteger(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = value === undefined ? Number.NaN : Number.parseInt(value, 10);
+  const selected = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.max(min, Math.min(max, Math.floor(selected)));
+}
+
+export function pythonThreadPlan(): PythonThreadPlan {
+  const systemLogical = Math.max(1, os.cpus().length || 1);
+  const available = Math.max(
+    1,
+    Math.min(
+      systemLogical,
+      typeof os.availableParallelism === "function" ? os.availableParallelism() : systemLogical
+    )
+  );
+  const extraProcessBudget = boundedInteger(
+    process.env.C2C_SANDBOX_EXTRA_PROCESSES,
+    DEFAULT_EXTRA_PROCESS_BUDGET,
+    0,
+    128
+  );
+  // Keep at least half of the extra task budget free for Python/runtime helper
+  // threads while preventing large hosts from causing BLAS oversubscription.
+  const taskBudgetThreads = Math.max(1, Math.floor(extraProcessBudget / 2));
+  const compute = Math.max(1, Math.min(available, taskBudgetThreads, MAX_NUMERIC_THREADS));
+  return { systemLogical, available, compute };
+}
 
 export class PythonExecutionError extends Error {
   constructor(
@@ -47,6 +84,7 @@ export interface PythonSandboxInfo {
   network: "blocked";
   externalExec: "blocked";
   limits: Record<string, number>;
+  threads: PythonThreadPlan;
 }
 
 export interface PythonExecuteResult {
@@ -74,7 +112,8 @@ function childEnvironment(
   workspaceRoot: string,
   sandboxTmp: string,
   timeoutSeconds: number,
-  environment: CondaEnvironmentInfo | null
+  environment: CondaEnvironmentInfo | null,
+  threads: PythonThreadPlan
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "LANG", "LC_ALL", "LC_CTYPE"] as const) {
@@ -92,6 +131,22 @@ function childEnvironment(
   env.C2C_SANDBOX_WORKSPACE = workspaceRoot;
   env.C2C_SANDBOX_TMP = sandboxTmp;
   env.C2C_SANDBOX_TIMEOUT_SECONDS = String(timeoutSeconds);
+  env.C2C_SANDBOX_SYSTEM_THREADS = String(threads.systemLogical);
+  env.C2C_SANDBOX_AVAILABLE_THREADS = String(threads.available);
+  env.C2C_SANDBOX_NUMERIC_THREADS = String(threads.compute);
+  for (const key of [
+    "OPENBLAS_NUM_THREADS",
+    "GOTO_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "OMP_THREAD_LIMIT",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "NUMEXPR_MAX_THREADS",
+  ] as const) {
+    env[key] = String(threads.compute);
+  }
   if (environment) {
     env.C2C_SANDBOX_RUNTIME_PREFIX = environment.prefix;
     env.C2C_SANDBOX_RUNTIME_NAME = environment.name;
@@ -170,7 +225,17 @@ function parseSandboxInfo(raw: string): PythonSandboxInfo | null {
       value.network !== "blocked" ||
       value.externalExec !== "blocked" ||
       !value.limits ||
-      typeof value.limits !== "object"
+      typeof value.limits !== "object" ||
+      !value.threads ||
+      typeof value.threads !== "object" ||
+      typeof value.threads.systemLogical !== "number" ||
+      typeof value.threads.available !== "number" ||
+      typeof value.threads.compute !== "number" ||
+      value.threads.systemLogical < 1 ||
+      value.threads.available < 1 ||
+      value.threads.compute < 1 ||
+      value.threads.available > value.threads.systemLogical ||
+      value.threads.compute > value.threads.available
     ) {
       return null;
     }
@@ -186,6 +251,11 @@ function parseSandboxInfo(raw: string): PythonSandboxInfo | null {
       network: "blocked",
       externalExec: "blocked",
       limits,
+      threads: {
+        systemLogical: Math.floor(value.threads.systemLogical),
+        available: Math.floor(value.threads.available),
+        compute: Math.floor(value.threads.compute),
+      },
     };
   } catch {
     return null;
@@ -320,6 +390,7 @@ export async function executePython(
   const executionId = `py_exec_${randomBytes(8).toString("hex")}`;
   const timeoutSeconds = Math.max(1, Math.min(300, Math.floor(input.timeoutSeconds ?? 120)));
   const sandboxTemp = makeSandboxTemp(workspace);
+  const threads = pythonThreadPlan();
   const argv = [
     "-I",
     "-S",
@@ -338,7 +409,7 @@ export async function executePython(
     try {
       child = spawn(command, argv, {
         cwd: workspace.root,
-        env: childEnvironment(workspace.root, sandboxTemp, timeoutSeconds, environment),
+        env: childEnvironment(workspace.root, sandboxTemp, timeoutSeconds, environment, threads),
         stdio: ["pipe", "pipe", "pipe", "pipe"],
         windowsHide: true,
         detached: process.platform !== "win32",
@@ -455,7 +526,7 @@ export async function executePython(
         changedFiles: files,
       };
       logger.info(
-        `Python execution ${executionId} finished: mode=${mode} exit=${code ?? "null"} timedOut=${timedOut} sandbox=landlock+seccomp environment=${environment?.id ?? "default"}`
+        `Python execution ${executionId} finished: mode=${mode} exit=${code ?? "null"} timedOut=${timedOut} sandbox=landlock+seccomp environment=${environment?.id ?? "default"} threads=${sandbox.threads.compute}/${sandbox.threads.available}`
       );
       resolve(result);
     });
