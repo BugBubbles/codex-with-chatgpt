@@ -210,6 +210,11 @@ const pythonSandboxOutputSchema = z.object({
   network: z.literal("blocked"),
   externalExec: z.literal("blocked"),
   limits: z.record(z.number().nonnegative()),
+  threads: z.object({
+    systemLogical: z.number().int().positive(),
+    available: z.number().int().positive(),
+    compute: z.number().int().positive(),
+  }),
 });
 
 const pythonExecuteOutputSchema = {
