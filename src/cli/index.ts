@@ -265,12 +265,6 @@ program
     const root = resolveWorkspace(opts.workspace);
     try {
       const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      const localMcp = await adminFetch<LocalMcpSummary>(
-        runtime,
-        "POST",
-        "/admin/local-mcp/discover",
-        120_000
-      );
       const connectorName = mcpUrl
         ? persistWorkspaceEndpoint({
             workspaceId: info.workspaceId,
@@ -286,7 +280,7 @@ program
       }
       check(`当前项目已识别（${info.workspaceName}）`);
       check("Local MCP Bridge 已启动");
-      check(`本地 MCP：发现 ${localMcp.serverCount} 个服务 / ${localMcp.toolCount} 个工具`);
+      check(`本地 MCP：恢复 ${info.localMcp.serverCount} 个服务 / ${info.localMcp.toolCount} 个工具`);
       if (mcpUrl) check("安全连接已建立");
     } catch (error) {
       handleCliError(error, opts.json);
@@ -312,6 +306,12 @@ program
       }
       const sandbox = trySandboxAllow();
       const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const localMcp = await adminFetch<LocalMcpSummary>(
+        runtime,
+        "POST",
+        "/admin/local-mcp/discover",
+        120_000
+      );
       const connectorName = mcpUrl
         ? persistWorkspaceEndpoint({
             workspaceId: info.workspaceId,
@@ -351,7 +351,8 @@ program
         return;
       }
       check(`当前项目已识别（${info.workspaceName}）`);
-      check("Workspace Bridge 已启动");
+      check("Local MCP Bridge 已启动");
+      check(`本地 MCP：发现 ${localMcp.serverCount} 个服务 / ${localMcp.toolCount} 个工具`);
       if (mcpUrl) check("安全连接已建立");
       say("");
       say(`连接地址：${mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`}`);
