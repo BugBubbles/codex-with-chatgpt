@@ -60,7 +60,7 @@ The bootstrap itself starts with `python -I -S`, so user/workspace startup hooks
 - Landlock ABI >= 4 rules that make the workspace and one private temp directory read/write, make Python runtime/library paths read-only, deny executable access, and deny TCP bind/connect.
 - A seccomp filter that denies socket APIs, external process signalling, namespace/mount/kernel-management APIs, IPC families, selected metadata syscalls not covered by Landlock ABI 4, and anonymous executable handoff.
 - Resource limits for CPU time, address space, output-file size, open file descriptors, core dumps, and additional processes.
-- Environment scrubbing. The executed code receives a private `HOME`/`TMPDIR`, a fixed minimal `PATH`, locale variables, and Python runtime flags only.
+- Environment scrubbing. The executed code receives a private `HOME`/`TMPDIR`, a fixed minimal `PATH`, locale variables, Python runtime flags, and a bounded numeric-thread plan only. OpenBLAS, BLIS, MKL, OpenMP, NumExpr and Accelerate/vecLib-compatible thread variables are set automatically before user imports.
 
 External program execution is blocked by the Landlock execute policy. Network socket creation is blocked by seccomp in addition to Landlock's TCP restrictions. When a Conda environment is selected, its entire prefix is added as a **read-only** runtime root, allowing its installed Python packages and native shared libraries to load while preventing environment/package writes. Environment `.pth` files are processed only after the sandbox is active; activation scripts and environment binaries are never executed.
 
@@ -72,7 +72,8 @@ If any sandbox step is unavailable or fails, `python_execute` returns `PYTHON_SA
 - Address space: 4 GiB.
 - Per-file size: 64 MiB.
 - Open file descriptors: 128.
-- Additional processes/threads under the bridge user's UID: approximately 32 above the count observed at sandbox setup.
+- Additional processes/threads under the bridge user's UID: approximately 32 above the current UID **task/thread** count observed at sandbox setup.
+- Numeric-library worker threads are auto-sized from the host logical CPU count and Node's affinity-aware available parallelism. The default compute pool is the minimum of available CPUs, half of the extra task budget, and 16 threads.
 - Core dump size: 0.
 
 Bridge operators can adjust bounded defaults with `C2C_SANDBOX_MEMORY_BYTES`, `C2C_SANDBOX_FILE_BYTES`, `C2C_SANDBOX_OPEN_FILES`, and `C2C_SANDBOX_EXTRA_PROCESSES`.
