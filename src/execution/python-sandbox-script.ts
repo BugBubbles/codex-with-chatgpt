@@ -90,6 +90,9 @@ memory_bytes = env_int("C2C_SANDBOX_MEMORY_BYTES", 4 * 1024**3, 256 * 1024**2, 1
 file_bytes = env_int("C2C_SANDBOX_FILE_BYTES", 64 * 1024**2, 8 * 1024**2, 512 * 1024**2)
 open_files = env_int("C2C_SANDBOX_OPEN_FILES", 128, 32, 1024)
 extra_processes = env_int("C2C_SANDBOX_EXTRA_PROCESSES", 32, 0, 128)
+system_threads = env_int("C2C_SANDBOX_SYSTEM_THREADS", 1, 1, 4096)
+available_threads = env_int("C2C_SANDBOX_AVAILABLE_THREADS", system_threads, 1, system_threads)
+numeric_threads = env_int("C2C_SANDBOX_NUMERIC_THREADS", min(available_threads, 16), 1, available_threads)
 
 def clamp_limit(kind, soft, hard=None):
     desired_hard = soft if hard is None else hard
@@ -109,7 +112,7 @@ limits["fileSize"] = clamp_limit(resource.RLIMIT_FSIZE, file_bytes)
 limits["openFiles"] = clamp_limit(resource.RLIMIT_NOFILE, open_files)
 limits["core"] = clamp_limit(resource.RLIMIT_CORE, 0)
 
-def count_uid_processes():
+def count_uid_tasks():
     count = 0
     uid = os.getuid()
     try:
@@ -119,21 +122,26 @@ def count_uid_processes():
     for name in names:
         if not name.isdigit():
             continue
+        proc_path = "/proc/" + name
         try:
-            st = os.stat("/proc/" + name)
-            if st.st_uid == uid:
-                count += 1
+            st = os.stat(proc_path)
+            if st.st_uid != uid:
+                continue
+            task_path = proc_path + "/task"
+            task_names = os.listdir(task_path)
+            count += sum(1 for task_name in task_names if task_name.isdigit())
         except OSError:
+            # Processes may exit while /proc is being scanned.
             pass
     return count
 
 if hasattr(resource, "RLIMIT_NPROC"):
-    process_count = count_uid_processes()
-    if process_count is not None:
+    task_count = count_uid_tasks()
+    if task_count is not None:
         limits["processes"] = clamp_limit(
             resource.RLIMIT_NPROC,
-            process_count + extra_processes,
-            process_count + extra_processes,
+            task_count + extra_processes,
+            task_count + extra_processes,
         )
 
 # Gather import roots before Landlock. The bootstrap is launched with -I -S,
@@ -420,6 +428,7 @@ if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(program)) != 0:
     err = ctypes.get_errno()
     fail("seccomp filter installation failed: " + os.strerror(err))
 
+thread_value = str(numeric_threads)
 clean_env = {
     "PATH": "/usr/bin:/bin",
     "HOME": sandbox_tmp,
@@ -432,6 +441,15 @@ clean_env = {
     "C2C_PYTHON_EXEC": "1",
     "PIP_NO_INDEX": "1",
     "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "OPENBLAS_NUM_THREADS": thread_value,
+    "GOTO_NUM_THREADS": thread_value,
+    "OMP_NUM_THREADS": thread_value,
+    "OMP_THREAD_LIMIT": thread_value,
+    "MKL_NUM_THREADS": thread_value,
+    "VECLIB_MAXIMUM_THREADS": thread_value,
+    "BLIS_NUM_THREADS": thread_value,
+    "NUMEXPR_NUM_THREADS": thread_value,
+    "NUMEXPR_MAX_THREADS": thread_value,
 }
 if runtime_prefix:
     clean_env["CONDA_PREFIX"] = runtime_prefix
@@ -478,6 +496,11 @@ status = {
     "network": "blocked",
     "externalExec": "blocked",
     "limits": {key: pair[0] for key, pair in limits.items()},
+    "threads": {
+        "systemLogical": int(system_threads),
+        "available": int(available_threads),
+        "compute": int(numeric_threads),
+    },
 }
 try:
     os.write(3, (json.dumps(status, separators=(",", ":")) + "\n").encode("utf-8"))
