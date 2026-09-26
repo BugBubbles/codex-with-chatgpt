@@ -58,7 +58,7 @@ bootstrap 自身使用 `python -I -S` 启动，因此 workspace 或用户目录�
 - Landlock ABI >= 4：workspace 和单独临时目录可读写；Python 运行时/库目录只读；文件执行被拒绝；TCP bind/connect 被拒绝。
 - seccomp：阻断 socket、对其他进程发送信号、namespace/mount/内核管理接口、若干 IPC、Landlock ABI 4 尚未覆盖的元数据 syscall，以及匿名可执行文件交接。
 - rlimit：限制 CPU、地址空间、单文件大小、打开 FD、core dump 和新增进程/线程。
-- 清理环境变量：用户代码只得到私有 `HOME`/`TMPDIR`、固定最小 `PATH`、locale 和必要 Python 标志。
+- 清理环境变量：用户代码只得到私有 `HOME`/`TMPDIR`、固定最小 `PATH`、locale、必要 Python 标志和受限数值线程计划。OpenBLAS、BLIS、MKL、OpenMP、NumExpr 等常见线程变量会在用户 import 前自动设置。
 
 外部系统程序不能执行；socket 创建也被 seccomp 阻断。选择 Conda 环境后，整个环境 prefix 只以**只读 runtime**形式加入 Landlock allow-list，因此其中已安装的 Python 包和 native shared library 可读取/加载，但环境目录不能写入。`.pth` 仅在沙箱已经生效后处理；不会执行 activation script，也不会执行环境中的 CLI。
 
@@ -70,7 +70,8 @@ bootstrap 自身使用 `python -I -S` 启动，因此 workspace 或用户目录�
 - 地址空间：4 GiB。
 - 单文件：64 MiB。
 - 打开文件描述符：128。
-- 在启动时已有同 UID 任务数基础上，额外允许约 32 个进程/线程。
+- 在启动时已有同 UID **task/thread 总数**基础上，额外允许约 32 个进程/线程。
+- 数值计算线程数会自动读取系统逻辑线程数和 Node affinity-aware 可用并行度；默认取“可用 CPU、额外 task 预算的一半、16”三者最小值。
 - core dump：0。
 
 可由 Bridge 启动环境通过 `C2C_SANDBOX_MEMORY_BYTES`、`C2C_SANDBOX_FILE_BYTES`、`C2C_SANDBOX_OPEN_FILES`、`C2C_SANDBOX_EXTRA_PROCESSES` 在代码设定的安全范围内调整。
