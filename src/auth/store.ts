@@ -4,11 +4,7 @@ import path from "node:path";
 import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 
 export const SUPPORTED_SCOPES = [
-  "workspace.read",
-  "workspace.search",
-  "git.read",
-  "execution.read",
-  "execution.write",
+  "mcp.tools",
   "offline_access",
 ] as const;
 

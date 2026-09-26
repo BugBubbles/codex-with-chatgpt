@@ -51,7 +51,7 @@ async function authorizeWithPairing(
   authorizeUrl.searchParams.set("state", state);
   authorizeUrl.searchParams.set("code_challenge", challenge);
   authorizeUrl.searchParams.set("code_challenge_method", "S256");
-  authorizeUrl.searchParams.set("scope", "workspace.read workspace.search git.read execution.read offline_access");
+  authorizeUrl.searchParams.set("scope", "mcp.tools offline_access");
 
   const pageResponse = await fetch(authorizeUrl, { redirect: "manual" });
   const html = await pageResponse.text();
@@ -98,7 +98,7 @@ describe("discovery metadata", () => {
     const body = (await response.json()) as { resource: string; authorization_servers: string[]; scopes_supported: string[] };
     expect(body.resource).toContain("/mcp");
     expect(body.authorization_servers.length).toBe(1);
-    expect(body.scopes_supported).toContain("execution.write");
+    expect(body.scopes_supported).toEqual(["mcp.tools", "offline_access"]);
   });
 
   it("serves authorization server metadata with PKCE S256", async () => {
@@ -107,7 +107,7 @@ describe("discovery metadata", () => {
     expect(body.code_challenge_methods_supported).toEqual(["S256"]);
     expect(body.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
     expect(body.registration_endpoint).toContain("/oauth/register");
-    expect(body.scopes_supported).toEqual(expect.arrayContaining(["execution.read", "execution.write"]));
+    expect(body.scopes_supported).toEqual(["mcp.tools", "offline_access"]);
   });
 });
 
@@ -300,7 +300,7 @@ describe("token enforcement on /mcp", () => {
   it("401 with an expired token", async () => {
     const expired = bridge.authStore.issueTokens({
       clientId: "test",
-      scopes: ["workspace.read"],
+      scopes: ["mcp.tools"],
       accessTtlMs: -1000,
     });
     const response = await mcpCall(expired.accessToken);
@@ -310,7 +310,7 @@ describe("token enforcement on /mcp", () => {
   it("403 with a token bound to another workspace", async () => {
     const foreign = bridge.authStore.issueTokens({
       clientId: "test",
-      scopes: ["workspace.read"],
+      scopes: ["mcp.tools"],
       workspaceId: "deadbeef0000",
     });
     const response = await mcpCall(foreign.accessToken);
@@ -318,7 +318,7 @@ describe("token enforcement on /mcp", () => {
   });
 
   it("401 after revocation", async () => {
-    const tokens = bridge.authStore.issueTokens({ clientId: "test", scopes: ["workspace.read"] });
+    const tokens = bridge.authStore.issueTokens({ clientId: "test", scopes: ["mcp.tools"] });
     expect((await mcpCall(tokens.accessToken)).status).toBe(200);
     bridge.authStore.revokeToken(tokens.accessToken);
     expect((await mcpCall(tokens.accessToken)).status).toBe(401);

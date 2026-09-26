@@ -6,8 +6,11 @@ import { AuthStore } from "../auth/store.js";
 import { createOAuthRouter } from "../auth/oauth.js";
 import { bearerAuth } from "../auth/middleware.js";
 import { PairingManager } from "../pairing/manager.js";
-import { createMcpServer } from "../mcp/server.js";
-import { createMcpHttpHandler } from "../mcp/http.js";
+import {
+  LocalMcpRegistry,
+  type LocalMcpDiscoveryOptions,
+} from "../mcp/local-registry.js";
+import { createLocalMcpHttpHandler } from "../mcp/local-http.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
@@ -40,6 +43,8 @@ export interface BridgeOptions {
   authStoreFile?: string;
   pairingTtlMs?: number;
   accessTokenTtlMs?: number;
+  /** Local Streamable HTTP MCP discovery settings. */
+  localMcpDiscovery?: LocalMcpDiscoveryOptions;
 }
 
 export interface Bridge {
@@ -50,6 +55,7 @@ export interface Bridge {
   authStore: AuthStore;
   pairing: PairingManager;
   tunnel: TunnelProvider;
+  localMcp: LocalMcpRegistry;
   getPublicBaseUrl(): string | null;
   localBaseUrl(): string;
   close(): Promise<void>;
@@ -90,6 +96,12 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
+  const localMcp = new LocalMcpRegistry({
+    workspaceId: workspace.id,
+    logger,
+    discovery: opts.localMcpDiscovery,
+  });
+  await localMcp.restore();
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
@@ -125,7 +137,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   // ---- MCP endpoint (bearer-protected) --------------------------------------
 
-  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger }), logger);
+  const mcpHandler = createLocalMcpHttpHandler(localMcp, logger);
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),
@@ -169,9 +181,20 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       tunnel: tunnel.status(),
       tokenCount: authStore.tokenCount(),
       pairingActive: pairing.hasActiveSession(),
+      localMcp: localMcp.summary(),
       pid: process.pid,
       startedAt,
     });
+  });
+
+  app.post("/admin/local-mcp/discover", adminGuard, (_req, res) => {
+    localMcp
+      .discover()
+      .then((summary) => res.json(summary))
+      .catch((error: Error) => {
+        logger.error("Local MCP discovery failed", { message: error.message });
+        res.status(500).json({ error: "local_mcp_discovery_failed", message: error.message });
+      });
   });
 
   app.post("/admin/tunnel/start", adminGuard, (_req, res) => {
@@ -236,6 +259,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     if (closed) return;
     closed = true;
     await tunnel.stop().catch(() => undefined);
+    await localMcp.close().catch(() => undefined);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
     logger.info("Bridge stopped");
@@ -249,6 +273,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     authStore,
     pairing,
     tunnel,
+    localMcp,
     getPublicBaseUrl: () => publicBaseUrl,
     localBaseUrl: () => `http://${host}:${port}`,
     close: shutdown,

@@ -6,11 +6,13 @@ on:
       - main
       - cli-only
       - python
+      - local-mcp
   push:
     branches:
       - main
       - cli-only
       - python
+      - local-mcp
 
 permissions:
   contents: read

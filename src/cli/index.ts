@@ -176,6 +176,14 @@ interface PairingResponse {
   expiresAt: number;
 }
 
+interface LocalMcpSummary {
+  serverCount: number;
+  toolCount: number;
+  duplicateToolNames: string[];
+  lastDiscoveryAt: string | null;
+  servers: Array<{ endpoint: string; toolCount: number }>;
+}
+
 interface AdminInfo {
   workspaceId: string;
   workspaceName: string;
@@ -185,6 +193,7 @@ interface AdminInfo {
   tunnel: { running: boolean; url: string | null; provider: string };
   tokenCount: number;
   pairingActive: boolean;
+  localMcp: LocalMcpSummary;
   pid: number;
   startedAt: string;
 }
@@ -256,6 +265,12 @@ program
     const root = resolveWorkspace(opts.workspace);
     try {
       const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const localMcp = await adminFetch<LocalMcpSummary>(
+        runtime,
+        "POST",
+        "/admin/local-mcp/discover",
+        120_000
+      );
       const connectorName = mcpUrl
         ? persistWorkspaceEndpoint({
             workspaceId: info.workspaceId,
@@ -270,7 +285,8 @@ program
         return;
       }
       check(`当前项目已识别（${info.workspaceName}）`);
-      check("Workspace Bridge 已启动");
+      check("Local MCP Bridge 已启动");
+      check(`本地 MCP：发现 ${localMcp.serverCount} 个服务 / ${localMcp.toolCount} 个工具`);
       if (mcpUrl) check("安全连接已建立");
     } catch (error) {
       handleCliError(error, opts.json);
@@ -323,6 +339,7 @@ program
             local: mcpUrl === null,
             pairingCode: pairingResult.code,
             pairingExpiresAt: pairingResult.expiresAt,
+            localMcp,
             sandbox,
             tunnel: {
               mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
@@ -413,6 +430,7 @@ program
     check(`Bridge：运行中（端口 ${info.port}）`);
     if (info.tunnel.running && info.tunnel.url) check(`安全连接：${info.tunnel.url}/mcp`);
     else say("· 安全连接：未启用（本地模式）");
+    say(`· 本地 MCP：${info.localMcp.serverCount} 个服务 / ${info.localMcp.toolCount} 个工具`);
     say(`· 已授权连接：${info.tokenCount > 0 ? "是" : "否"}`);
   });
 

@@ -1,102 +1,60 @@
-# Codex with ChatGPT — Python 分支
+# Codex with ChatGPT — local-mcp 分支
 
-> ChatGPT 负责分析并生成 Python，本地 Bridge 只在严格、失败即关闭（fail-closed）的 Linux 沙箱中执行。
+这个分支把原有的 OAuth、配对码和 Cloudflare Tunnel 变成一个**本地 Streamable HTTP MCP 聚合桥**。
 
-`python` 分支保留 OAuth、Tunnel、workspace 读取/Git 工具和直接 Python 写入能力，并将 `python_execute` 限制在 Landlock + seccomp + `no_new_privs` + rlimit 的非 root 严格沙箱中。
+它不再把 workspace、Git、Python、Conda 或 Codex 工具暴露给远程网页。执行 `c2c setup` 时，Bridge 会自动扫描本机 loopback 上正在监听的端口，尝试连接其中的 Streamable HTTP MCP 服务并读取它们的 `tools/list`。远程 ChatGPT 看到的是实际发现到的本地 MCP 工具，而不是代码里预先写死的一组工具或端口。
 
-## MCP 工具
-
-保留读取/状态工具：
-
-- `workspace_info`
-- `list_directory`
-- `read_file`
-- `search_workspace`
-- `git_status`
-- `git_diff`
-- `test_status`
-- `execution_summary`
-- `execution_output`
-- `conda_environments`：只读枚举本机已安装的 Conda 环境及其 Python/包元数据；不会调用 Conda，也不会修改环境。
-
-拥有 `execution.write` scope 后：
-
-- `python_write_file(path, content)`：继续使用 workspace canonical path、symlink escape 和敏感文件检查，原子写入 UTF-8 文本。
-- `python_execute(code | path, args?, environment?, timeout_seconds?)`：只有严格沙箱全部安装成功后才执行内联 Python 或 workspace 内的 `.py` 文件；`environment` 必须是 `conda_environments` 返回的精确环境 ID。返回的 `changedFiles` 只记录本次执行期间实际发生状态变化的 Git 可见路径，不会把执行前已有但本次未触碰的 dirty 文件算进去。
-
-本分支仍不暴露 `submit_codex_task`、`codex_task_status`、`cancel_codex_task`。
-
-## 环境要求
-
-- Linux x86_64
-- 内核 Landlock ABI 4 或更高
-- Node.js >= 20
-- Python 3
-- git
-- 公网 Connector 场景需要 `cloudflared`
-
-**不需要 root、系统安装 Bubblewrap、容器运行时或 `/etc/subuid` 配置。**
-
-默认解释器为 `python3`；可通过 `C2C_PYTHON_BIN=/absolute/path/to/python` 指定其他默认解释器。Conda 切换不会执行 `conda activate`：Bridge 只读发现环境后直接启动所选环境的 Python。可选的 `C2C_CONDA_ROOTS`（按系统 PATH 分隔符分隔）可增加由操作者明确允许的扫描根目录。
-
-## 安装
+## 使用
 
 ```bash
-git clone https://github.com/BugBubbles/codex-with-chatgpt.git
-cd codex-with-chatgpt
-git checkout python
+git checkout local-mcp
 corepack pnpm install
 corepack pnpm build
-c2c start -w <workspace> --tunnel
+c2c setup -w <用于保存连接状态的本地目录>
 ```
 
-## 沙箱保证
+配置输出会显示发现了多少个本地 MCP 服务和工具，然后给出公网 MCP 地址与配对码。
 
-bootstrap 自身使用 `python -I -S` 启动，因此 workspace 或用户目录中的 Python startup/site hook 不会在隔离前执行。只有以下步骤全部成功后才开始用户代码：
+默认自动发现：
 
-- 设置 `PR_SET_NO_NEW_PRIVS`。
-- Landlock ABI >= 4：workspace 和单独临时目录可读写；Python 运行时/库目录只读；文件执行被拒绝；TCP bind/connect 被拒绝。
-- seccomp：阻断 socket、对其他进程发送信号、namespace/mount/内核管理接口、若干 IPC、Landlock ABI 4 尚未覆盖的元数据 syscall，以及匿名可执行文件交接。
-- rlimit：限制 CPU、地址空间、单文件大小、打开 FD、core dump 和新增进程/线程。
-- 清理环境变量：用户代码只得到私有 `HOME`/`TMPDIR`、固定最小 `PATH`、locale、必要 Python 标志和受限数值线程计划。OpenBLAS、BLIS、MKL、OpenMP、NumExpr 等常见线程变量会在用户 import 前自动设置。
+- host：`127.0.0.1`
+- port：完整的 `1-65535`
+- path：`/mcp`
 
-外部系统程序不能执行；socket 创建也被 seccomp 阻断。选择 Conda 环境后，整个环境 prefix 只以**只读 runtime**形式加入 Landlock allow-list，因此其中已安装的 Python 包和 native shared library 可读取/加载，但环境目录不能写入。`.pth` 仅在沙箱已经生效后处理；不会执行 activation script，也不会执行环境中的 CLI。
+这里的端口不是 allow-list；扫描范围可以自由调整。自定义 path、IPv6-only 服务或不希望扫描的场景，也可以通过显式 endpoint 配置。
 
-只要任何沙箱步骤失败，`python_execute` 就返回 `PYTHON_SANDBOX_FAILED`，**不会降级为直接本地执行**。
+## 可选发现配置
 
-### 默认资源上限
+以下环境变量不是必须的，只用于加速扫描或覆盖特殊本地部署：
 
-- timeout：默认 120 秒，最大 300 秒。
-- 地址空间：4 GiB。
-- 单文件：64 MiB。
-- 打开文件描述符：128。
-- 在启动时已有同 UID **task/thread 总数**基础上，额外允许约 32 个进程/线程。
-- 数值计算线程数会自动读取系统逻辑线程数和 Node affinity-aware 可用并行度；默认取“可用 CPU、额外 task 预算的一半、16”三者最小值。
-- core dump：0。
+- `C2C_LOCAL_MCP_ENDPOINTS`：逗号或分号分隔的完整 loopback URL，例如 `http://127.0.0.1:23120/mcp;http://127.0.0.1:8765/custom`
+- `C2C_LOCAL_MCP_HOSTS`：默认 `127.0.0.1`；需要 IPv6 时可加入 `::1`
+- `C2C_LOCAL_MCP_PORTS`：例如 `3000,5173,8000-9000,23120`；默认 `1-65535`
+- `C2C_LOCAL_MCP_PATHS`：自动扫描开放端口时尝试的 path，默认 `/mcp`
+- `C2C_LOCAL_MCP_SCAN_CONCURRENCY`：TCP 端口扫描并发
+- `C2C_LOCAL_MCP_CONNECT_TIMEOUT_MS`：TCP 探测超时
+- `C2C_LOCAL_MCP_PROBE_TIMEOUT_MS`：MCP initialize / tools/list 探测超时
+- `C2C_LOCAL_MCP_PROBE_CONCURRENCY`：MCP 端点探测并发
 
-可由 Bridge 启动环境通过 `C2C_SANDBOX_MEMORY_BYTES`、`C2C_SANDBOX_FILE_BYTES`、`C2C_SANDBOX_OPEN_FILES`、`C2C_SANDBOX_EXTRA_PROCESSES` 在代码设定的安全范围内调整。
+显式 endpoint 必须是本机 loopback HTTP 地址，但端口和 path 不受代码中的固定列表限制。
 
-## 一个必须明确的剩余边界
+## 多 MCP 聚合
 
-`python_execute` 把**整个 connected workspace 当作可读写信任边界**。Landlock ABI 4 无法在允许一个目录可写的同时，再从其中减去单独的敏感子文件。因此，与 `read_file` / `python_write_file` 不同，任意 Python 可以读取或修改 workspace 中已经存在的文件；如果 workspace 本身放了 `.env`，Python 也能看到它。
+多个本地 MCP 可以同时存在。工具名全局唯一时会原样暴露；如果不同 MCP 提供相同工具名，Bridge 会只对冲突项自动生成带来源的稳定别名，从而保证所有工具都能被远程调用，而不是静默覆盖其中一个。
 
-因此，不希望模型生成的 Python 接触到的密钥，应放在 connected workspace 之外。这个沙箱主要隔离的是用户主目录其余部分、其他项目、网络和同 UID 的其他进程。
+发现结果会保存在用户状态目录。Bridge 重启时会快速恢复已发现的 endpoint；再次运行 `c2c setup` 会重新扫描并刷新工具表。
 
-完整威胁模型见 [docs/security.md](docs/security.md)。
+## 安全边界
+
+- 公网 OAuth Bearer Token 不会转发给任何本地 MCP。
+- 自动发现只扫描 loopback，不会把代理变成任意内网/公网 SSRF。
+- 公网 MCP 只暴露 `initialize`、`ping`、`tools/list`、`tools/call` 和必要通知；resources、prompts 等其他 MCP 能力不会透出。
+- 本地 MCP 的工具定义和调用结果由对应 MCP 服务本身负责。
 
 ## 开发
 
 ```bash
-corepack pnpm install
 corepack pnpm typecheck
 corepack pnpm test
 corepack pnpm build
 ```
-
-## Conda 环境使用
-
-1. 调用 `conda_environments` 获取当前可用环境，并选择返回的 `id`。
-2. 将该精确 ID 传给 `python_execute(environment=...)`。
-3. 所选环境的 Python、已安装 Python 库和 native runtime 库可在沙箱中只读使用；环境 prefix 本身不可写。
-
-本分支刻意不提供 `conda install/remove/create/env remove`、`pip install`、任意解释器路径等 MCP 能力；网络和外部进程执行仍被阻断，因此“切换环境”不会演变为环境/包管理能力。
