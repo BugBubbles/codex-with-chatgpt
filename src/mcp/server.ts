@@ -7,6 +7,7 @@ import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js"
 import { executionRecordSchema, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import { listExecutionOutputs, readExecutionOutput } from "../execution/output.js";
 import { executePython, PythonExecutionError, writeWorkspaceTextFile } from "../execution/python-runner.js";
+import { listCondaEnvironments } from "../execution/conda-environments.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 
@@ -180,6 +181,20 @@ const executionOutputOutputSchema = {
   text: z.string().optional().describe("Sanitized command output returned by the read operation"),
 };
 
+const condaEnvironmentOutputSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  prefix: z.string(),
+  python: z.string(),
+  pythonVersion: z.string().nullable(),
+  packageCount: z.number().int().nonnegative(),
+  isDefault: z.boolean(),
+});
+
+const condaEnvironmentsOutputSchema = {
+  environments: z.array(condaEnvironmentOutputSchema),
+};
+
 const pythonWriteFileOutputSchema = {
   path: z.string(),
   bytesWritten: z.number().int().nonnegative(),
@@ -207,6 +222,7 @@ const pythonExecuteOutputSchema = {
   outputAvailable: z.boolean(),
   output: z.string().nullable(),
   sandbox: pythonSandboxOutputSchema,
+  environment: condaEnvironmentOutputSchema.nullable(),
   changedFiles: z.array(z.string()),
 };
 
@@ -503,6 +519,28 @@ export function createMcpServer(ctx: McpContext): McpServer {
   );
 
   server.registerTool(
+    "conda_environments",
+    {
+      title: "Conda environments",
+      description:
+        "Read-only discovery of locally installed Conda environments. This never invokes conda/mamba, activation hooks, package installation, environment creation, removal, or mutation. Use the returned environment id with python_execute(environment=...).",
+      inputSchema: {},
+      outputSchema: condaEnvironmentsOutputSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (_args, extra) => {
+      const denied = requireScope(extra.authInfo, "execution.read");
+      if (denied) return denied;
+      return okStructured({ environments: listCondaEnvironments() });
+    }
+  );
+
+  server.registerTool(
     "python_write_file",
     {
       title: "Python workspace write",
@@ -536,11 +574,17 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Execute Python",
       description:
-        "Execute Python inside a strict local Linux x86_64 sandbox with the workspace as cwd. Supply exactly one of inline code or a workspace-relative .py file path. The sandbox is fail-closed and requires Landlock ABI 4+, seccomp and no_new_privs; it blocks network access and external program execution, limits filesystem access to the workspace/private temp plus read-only Python runtime paths, scrubs the environment, applies resource limits, records git-visible changes, and sanitizes returned output.",
+        "Execute Python inside a strict local Linux x86_64 sandbox with the workspace as cwd. Supply exactly one of inline code or a workspace-relative .py file path. Optionally select an exact id returned by conda_environments; the selected Conda prefix is exposed read-only so its installed Python libraries can be imported, while Conda/package management, network access and external program execution remain blocked. The sandbox is fail-closed and requires Landlock ABI 4+, seccomp and no_new_privs.",
       inputSchema: {
         code: z.string().min(1).max(200_000).optional().describe("Inline Python source. Mutually exclusive with path."),
         path: z.string().min(1).max(2000).optional().describe("Workspace-relative .py file. Mutually exclusive with code."),
         args: z.array(z.string().max(2000)).max(50).default([]).describe("Arguments exposed through sys.argv"),
+        environment: z
+          .string()
+          .min(1)
+          .max(80)
+          .optional()
+          .describe("Exact Conda environment id returned by conda_environments. Names and filesystem paths are not accepted."),
         timeout_seconds: z.number().int().min(1).max(300).default(120),
       },
       outputSchema: pythonExecuteOutputSchema,
@@ -561,6 +605,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
             path: args.path,
             args: args.args,
             timeoutSeconds: args.timeout_seconds,
+            environment: args.environment,
           })
         );
       } catch (error) {
