@@ -10,7 +10,7 @@ import {
   type CondaEnvironmentInfo,
 } from "./conda-environments.js";
 import type { Logger } from "../logger/index.js";
-import { gitStatus } from "../workspace/git.js";
+import { runGit } from "../workspace/git.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
 import { appendExecutionRecord } from "./records.js";
 import { readExecutionOutput, saveExecutionOutput } from "./output.js";
@@ -173,18 +173,122 @@ function pathWithin(parent: string, candidate: string): boolean {
   );
 }
 
-function changedFiles(workspace: Workspace): string[] {
+type WorkspaceChangeSnapshot = Map<string, string>;
+
+function filesystemFingerprint(workspace: Workspace, relPath: string): string {
+  const abs = path.join(workspace.root, relPath);
   try {
-    const status = gitStatus(workspace);
-    const files = new Set<string>();
-    for (const entry of status.staged) files.add(entry.path);
-    for (const entry of status.unstaged) files.add(entry.path);
-    for (const entry of status.untracked) files.add(entry);
-    for (const entry of status.conflicted) files.add(entry);
-    return [...files].sort();
+    const stat = fs.lstatSync(abs, { bigint: true });
+    const common = [
+      stat.mode.toString(),
+      stat.size.toString(),
+      stat.mtimeNs.toString(),
+      stat.ctimeNs.toString(),
+    ].join(":");
+    if (stat.isSymbolicLink()) {
+      let target = "";
+      try {
+        target = fs.readlinkSync(abs);
+      } catch {
+        target = "<unreadable>";
+      }
+      return `symlink:${common}:${target}`;
+    }
+    if (stat.isFile()) return `file:${common}`;
+    if (stat.isDirectory()) return `dir:${common}`;
+    return `other:${common}`;
   } catch {
-    return [];
+    return "missing";
   }
+}
+
+function addSnapshotPath(
+  snapshot: WorkspaceChangeSnapshot,
+  workspace: Workspace,
+  relPath: string,
+  statusFingerprint: string
+): void {
+  if (!relPath || workspace.ignoreRules.isSensitive(relPath)) return;
+  snapshot.set(
+    relPath,
+    `${statusFingerprint}|${filesystemFingerprint(workspace, relPath)}`
+  );
+}
+
+/**
+ * Capture only git-visible dirty paths. --untracked-files=all expands
+ * untracked directories to individual files so a pre-existing large
+ * untracked tree is not recursively hashed on every execution.
+ *
+ * Filesystem metadata includes nanosecond ctime, which changes on normal file
+ * writes even when size/mtime are preserved. This lets us distinguish an
+ * already-dirty file that Python touched again without reading large files.
+ */
+function workspaceChangeSnapshot(workspace: Workspace): WorkspaceChangeSnapshot | null {
+  const result = runGit(workspace.root, [
+    "status",
+    "--porcelain=v2",
+    "-z",
+    "--untracked-files=all",
+    "--",
+    ".",
+  ]);
+  if (!result.ok) return null;
+
+  const snapshot: WorkspaceChangeSnapshot = new Map();
+  const records = result.stdout.split("\0");
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record || record.startsWith("# ")) continue;
+
+    if (record.startsWith("? ")) {
+      const relPath = record.slice(2);
+      addSnapshotPath(snapshot, workspace, relPath, "?");
+      continue;
+    }
+
+    const ordinary = record.match(
+      /^1 ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) (.*)$/s
+    );
+    if (ordinary) {
+      const relPath = ordinary[8];
+      addSnapshotPath(snapshot, workspace, relPath, ordinary.slice(1, 8).join(":"));
+      continue;
+    }
+
+    const renamed = record.match(
+      /^2 ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) (.*)$/s
+    );
+    if (renamed) {
+      const destination = renamed[9];
+      const origin = records[index + 1] ?? "";
+      index += 1;
+      const status = renamed.slice(1, 9).join(":");
+      addSnapshotPath(snapshot, workspace, destination, `rename-dest:${status}`);
+      addSnapshotPath(snapshot, workspace, origin, `rename-origin:${status}`);
+      continue;
+    }
+
+    const unmerged = record.match(
+      /^u ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) (.*)$/s
+    );
+    if (unmerged) {
+      const relPath = unmerged[10];
+      addSnapshotPath(snapshot, workspace, relPath, unmerged.slice(1, 10).join(":"));
+    }
+  }
+  return snapshot;
+}
+
+function changedFilesSince(
+  before: WorkspaceChangeSnapshot | null,
+  after: WorkspaceChangeSnapshot | null
+): string[] {
+  if (!before || !after) return [];
+  const paths = new Set([...before.keys(), ...after.keys()]);
+  return [...paths]
+    .filter((relPath) => before.get(relPath) !== after.get(relPath))
+    .sort();
 }
 
 function appendCaptured(current: string, chunk: unknown): string {
@@ -389,6 +493,7 @@ export async function executePython(
 
   const executionId = `py_exec_${randomBytes(8).toString("hex")}`;
   const timeoutSeconds = Math.max(1, Math.min(300, Math.floor(input.timeoutSeconds ?? 120)));
+  const changeSnapshotBefore = workspaceChangeSnapshot(workspace);
   const sandboxTemp = makeSandboxTemp(workspace);
   const threads = pythonThreadPlan();
   const argv = [
@@ -496,7 +601,7 @@ export async function executePython(
         taskId: executionId,
         iteration: 0,
       });
-      const files = changedFiles(workspace);
+      const files = changedFilesSince(changeSnapshotBefore, workspaceChangeSnapshot(workspace));
       appendExecutionRecord(workspace.id, {
         taskId: executionId,
         iteration: 0,
