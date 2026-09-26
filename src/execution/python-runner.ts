@@ -3,6 +3,11 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { PYTHON_SANDBOX_BOOTSTRAP } from "./python-sandbox-script.js";
+import {
+  configuredPythonCommand,
+  findCondaEnvironment,
+  type CondaEnvironmentInfo,
+} from "./conda-environments.js";
 import type { Logger } from "../logger/index.js";
 import { gitStatus } from "../workspace/git.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
@@ -14,7 +19,11 @@ const MAX_WRITE_BYTES = 2 * 1024 * 1024;
 
 export class PythonExecutionError extends Error {
   constructor(
-    readonly code: "INVALID_ARGUMENTS" | "PYTHON_SPAWN_FAILED" | "PYTHON_SANDBOX_FAILED",
+    readonly code:
+      | "INVALID_ARGUMENTS"
+      | "PYTHON_SPAWN_FAILED"
+      | "PYTHON_SANDBOX_FAILED"
+      | "CONDA_ENVIRONMENT_NOT_FOUND",
     message: string
   ) {
     super(message);
@@ -27,6 +36,7 @@ export interface PythonExecuteInput {
   path?: string;
   args?: string[];
   timeoutSeconds?: number;
+  environment?: string;
 }
 
 export interface PythonSandboxInfo {
@@ -49,6 +59,7 @@ export interface PythonExecuteResult {
   outputAvailable: boolean;
   output: string | null;
   sandbox: PythonSandboxInfo;
+  environment: CondaEnvironmentInfo | null;
   changedFiles: string[];
 }
 
@@ -59,14 +70,11 @@ export interface PythonWriteResult {
   sha256: string;
 }
 
-function pythonCommand(): string {
-  return process.env.C2C_PYTHON_BIN?.trim() || (process.platform === "win32" ? "python" : "python3");
-}
-
 function childEnvironment(
   workspaceRoot: string,
   sandboxTmp: string,
-  timeoutSeconds: number
+  timeoutSeconds: number,
+  environment: CondaEnvironmentInfo | null
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "LANG", "LC_ALL", "LC_CTYPE"] as const) {
@@ -84,6 +92,11 @@ function childEnvironment(
   env.C2C_SANDBOX_WORKSPACE = workspaceRoot;
   env.C2C_SANDBOX_TMP = sandboxTmp;
   env.C2C_SANDBOX_TIMEOUT_SECONDS = String(timeoutSeconds);
+  if (environment) {
+    env.C2C_SANDBOX_RUNTIME_PREFIX = environment.prefix;
+    env.C2C_SANDBOX_RUNTIME_NAME = environment.name;
+    env.C2C_SANDBOX_RUNTIME_ID = environment.id;
+  }
 
   for (const key of [
     "C2C_SANDBOX_MEMORY_BYTES",
@@ -95,6 +108,14 @@ function childEnvironment(
     if (value !== undefined) env[key] = value;
   }
   return env;
+}
+
+function pathWithin(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))
+  );
 }
 
 function changedFiles(workspace: Workspace): string[] {
@@ -242,7 +263,28 @@ export async function executePython(
     );
   }
 
-  const command = pythonCommand();
+  const requestedEnvironment = input.environment?.trim() || null;
+  const environment = requestedEnvironment ? findCondaEnvironment(requestedEnvironment) : null;
+  if (requestedEnvironment && !environment) {
+    throw new PythonExecutionError(
+      "CONDA_ENVIRONMENT_NOT_FOUND",
+      "Unknown Conda environment id. Call conda_environments and use an exact returned id."
+    );
+  }
+  if (
+    environment &&
+    (pathWithin(workspace.root, environment.prefix) || pathWithin(environment.prefix, workspace.root))
+  ) {
+    throw new PythonExecutionError(
+      "INVALID_ARGUMENTS",
+      "Selected Conda environment overlaps the connected workspace and cannot be made read-only."
+    );
+  }
+
+  const command = environment?.python ?? configuredPythonCommand();
+  const environmentNote = environment
+    ? ` in Conda environment ${environment.name} (${environment.id})`
+    : "";
   const extraArgs = input.args ?? [];
   let mode: "inline" | "file";
   let target: string;
@@ -253,7 +295,9 @@ export async function executePython(
     mode = "inline";
     target = "-";
     inlineSource = input.code!;
-    commandLabel = `${command} <strict-sandbox> -c <inline-python>`;
+    commandLabel = environment
+      ? `conda:${environment.name}/${environment.id} python <strict-sandbox> -c <inline-python>`
+      : `${command} <strict-sandbox> -c <inline-python>`;
   } else {
     const resolved = workspace.resolve(input.path!);
     if (path.extname(resolved.rel).toLowerCase() !== ".py") {
@@ -268,7 +312,9 @@ export async function executePython(
     if (!stat.isFile()) throw new WorkspaceError("NOT_A_FILE", `Not a regular file: ${resolved.rel}`);
     mode = "file";
     target = resolved.abs;
-    commandLabel = `${command} <strict-sandbox> ${resolved.rel}`;
+    commandLabel = environment
+      ? `conda:${environment.name}/${environment.id} python <strict-sandbox> ${resolved.rel}`
+      : `${command} <strict-sandbox> ${resolved.rel}`;
   }
 
   const executionId = `py_exec_${randomBytes(8).toString("hex")}`;
@@ -292,7 +338,7 @@ export async function executePython(
     try {
       child = spawn(command, argv, {
         cwd: workspace.root,
-        env: childEnvironment(workspace.root, sandboxTemp, timeoutSeconds),
+        env: childEnvironment(workspace.root, sandboxTemp, timeoutSeconds, environment),
         stdio: ["pipe", "pipe", "pipe", "pipe"],
         windowsHide: true,
         detached: process.platform !== "win32",
@@ -389,7 +435,7 @@ export async function executePython(
         timestamp: new Date().toISOString(),
         notes: timedOut
           ? `Sandboxed Python execution timed out after ${timeoutSeconds} seconds.`
-          : `Sandboxed Python ${mode} execution completed.`,
+          : `Sandboxed Python ${mode} execution completed${environmentNote}.`,
         outputId: output.id,
         outputAvailable: output.allowed,
       });
@@ -405,10 +451,11 @@ export async function executePython(
         outputAvailable: output.allowed,
         output: readable?.ok ? readable.text : null,
         sandbox,
+        environment,
         changedFiles: files,
       };
       logger.info(
-        `Python execution ${executionId} finished: mode=${mode} exit=${code ?? "null"} timedOut=${timedOut} sandbox=landlock+seccomp`
+        `Python execution ${executionId} finished: mode=${mode} exit=${code ?? "null"} timedOut=${timedOut} sandbox=landlock+seccomp environment=${environment?.id ?? "default"}`
       );
       resolve(result);
     });
