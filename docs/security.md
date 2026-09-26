@@ -108,7 +108,8 @@ Defaults are deliberately finite:
 | Address space | 4 GiB |
 | Per-file size | 64 MiB |
 | Open file descriptors | 128 |
-| Additional UID processes/threads | ~32 above observed baseline |
+| Additional UID tasks/threads | ~32 above the current UID task count |
+| Numeric worker threads | min(affinity-aware available CPUs, half the extra task budget, 16) |
 | Core dump | 0 |
 
 Bounded operator overrides:
@@ -117,6 +118,10 @@ Bounded operator overrides:
 - `C2C_SANDBOX_FILE_BYTES`: 8–512 MiB.
 - `C2C_SANDBOX_OPEN_FILES`: 32–1024.
 - `C2C_SANDBOX_EXTRA_PROCESSES`: 0–128.
+
+The bridge obtains both the host logical CPU count and Node's affinity-aware available parallelism for every execution. It publishes `systemLogical`, `available`, and `compute` in the sandbox attestation and sets `OPENBLAS_NUM_THREADS`, `GOTO_NUM_THREADS`, `OMP_NUM_THREADS`, `OMP_THREAD_LIMIT`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `BLIS_NUM_THREADS`, `NUMEXPR_NUM_THREADS`, and `NUMEXPR_MAX_THREADS` to the computed value before user imports. The compute value is capped at 16 and also at half of the configured extra task budget, leaving room for runtime/helper threads.
+
+`RLIMIT_NPROC` is based on the current UID's real Linux task count by summing `/proc/<pid>/task`, rather than merely counting process leaders. This matches Linux's task-oriented enforcement more closely and avoids prematurely exhausting the limit on machines that already have multithreaded processes.
 
 These are per-process/kernel limits, not a cgroup quota. They reduce but do not completely eliminate denial-of-service risk; in particular, many small files can consume aggregate disk space inside the workspace.
 
