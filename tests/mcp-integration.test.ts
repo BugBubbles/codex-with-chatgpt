@@ -100,7 +100,7 @@ describe("MCP tools over Streamable HTTP", () => {
       expect(names).not.toContain(forbidden);
     }
 
-    expectToolOutputSchema(tools, "workspace_info", ["workspaceId", "workspaceName", "projectType", "git"]);
+    expectToolOutputSchema(tools, "workspace_info", ["workspaceId", "workspaceName", "projectType", "git", "hardware"]);
     expectToolOutputSchema(tools, "list_directory", ["path", "entries", "total", "hasMore"]);
     expectToolOutputSchema(tools, "read_file", ["path", "content", "startLine", "endLine", "nextStartLine"]);
     expectToolOutputSchema(tools, "search_workspace", ["matches", "matchCount", "truncated", "engine"]);
@@ -125,12 +125,31 @@ describe("MCP tools over Streamable HTTP", () => {
 
   it("workspace_info returns identity and project detection", async () => {
     const result = await client.callTool({ name: "workspace_info", arguments: {} });
-    const info = structuredJsonOf<{ workspaceId: string; projectType: string; frameworks: string[]; git: { isRepo: boolean; branch: string } }>(result);
+    const info = structuredJsonOf<{
+      workspaceId: string;
+      projectType: string;
+      frameworks: string[];
+      git: { isRepo: boolean; branch: string };
+      hardware: {
+        cpu: { logicalCores: number; availableCores: number };
+        memory: { totalBytes: number; availableBytes: number; usedPercent: number; swap: { totalBytes: number } };
+        gpus: unknown[];
+        storage: { totalBytes: number; availableBytes: number } | null;
+      };
+    }>(result);
     expect(info.workspaceId).toBe(bridge.workspace.id);
     expect(info.projectType).toBe("node");
     expect(info.frameworks).toContain("React");
     expect(info.git.isRepo).toBe(true);
     expect(info.git.branch).toBe("main");
+    expect(info.hardware.cpu.logicalCores).toBeGreaterThan(0);
+    expect(info.hardware.cpu.availableCores).toBeGreaterThan(0);
+    expect(info.hardware.memory.totalBytes).toBeGreaterThan(0);
+    expect(info.hardware.memory.availableBytes).toBeGreaterThanOrEqual(0);
+    expect(info.hardware.memory.usedPercent).toBeGreaterThanOrEqual(0);
+    expect(info.hardware.memory.usedPercent).toBeLessThanOrEqual(100);
+    expect(Array.isArray(info.hardware.gpus)).toBe(true);
+    expect(info.hardware.storage === null || info.hardware.storage.totalBytes > 0).toBe(true);
   });
 
   it("read_file returns hello.txt", async () => {
