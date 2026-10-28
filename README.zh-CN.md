@@ -35,12 +35,35 @@ c2c setup -w <用于保存连接状态的本地目录>
 - `C2C_LOCAL_MCP_CONNECT_TIMEOUT_MS`：TCP 探测超时
 - `C2C_LOCAL_MCP_PROBE_TIMEOUT_MS`：MCP initialize / tools/list 探测超时
 - `C2C_LOCAL_MCP_PROBE_CONCURRENCY`：MCP 端点探测并发
+- `C2C_LOCAL_MCP_SERVERS`：具名服务的 JSON 配置；支持用环境变量名引用 Bearer token
 
 显式 endpoint 必须是本机 loopback HTTP 地址，但端口和 path 不受代码中的固定列表限制。
+
+具名 Streamable HTTP 服务可以这样配置：
+
+```json
+[
+  {
+    "name": "llm-for-zotero",
+    "endpoint": "http://127.0.0.1:23119/llm-for-zotero/mcp",
+    "bearerTokenEnv": "LLM_FOR_ZOTERO_BEARER_TOKEN",
+    "imageArtifactPathMappings": [
+      {
+        "from": "D:\\ProgramData\\Zotero\\llm-for-zotero-mineru",
+        "to": "/mnt/d/ProgramData/Zotero/llm-for-zotero-mineru"
+      }
+    ]
+  }
+]
+```
+
+`bearerTokenEnv` 只保存环境变量名，Bearer token 本身不会写入状态文件。服务名会作为工具名前缀，例如 `llm-for-zotero__paper_read`。图像 artifact 只会从显式映射的目录读取，并作为标准 MCP image 内容块转发。
 
 ## 多 MCP 聚合
 
 多个本地 MCP 可以同时存在。工具名全局唯一时会原样暴露；如果不同 MCP 提供相同工具名，Bridge 会只对冲突项自动生成带来源的稳定别名，从而保证所有工具都能被远程调用，而不是静默覆盖其中一个。
+
+具名 MCP 的所有工具会使用服务名作为前缀；未命名的旧 endpoint 继续沿用原有名称和冲突处理规则。
 
 发现结果会保存在用户状态目录。Bridge 重启时会快速恢复已发现的 endpoint；再次运行 `c2c setup` 会重新扫描并刷新工具表。
 

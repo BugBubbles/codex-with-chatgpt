@@ -181,7 +181,7 @@ interface LocalMcpSummary {
   toolCount: number;
   duplicateToolNames: string[];
   lastDiscoveryAt: string | null;
-  servers: Array<{ endpoint: string; toolCount: number }>;
+  servers: Array<{ name?: string; endpoint: string; toolCount: number }>;
 }
 
 interface AdminInfo {
