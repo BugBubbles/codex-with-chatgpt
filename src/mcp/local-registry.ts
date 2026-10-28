@@ -1,6 +1,7 @@
 import net from "node:net";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Logger } from "../logger/index.js";
@@ -22,7 +23,7 @@ export interface LocalMcpArtifactPathMapping {
 }
 
 export interface LocalMcpServerConfig {
-  /** Optional stable server name; named tools are exposed as <name>__<tool>. */
+  /** Optional stable service name used for its connector path and display name. */
   name?: string;
   endpoint: string;
   /** Read the Bearer token from this environment variable. The token is never persisted. */
@@ -31,20 +32,16 @@ export interface LocalMcpServerConfig {
   imageArtifactPathMappings?: LocalMcpArtifactPathMapping[];
 }
 
-interface ConnectedServer {
+interface ConnectedServerCandidate {
   config: LocalMcpServerConfig;
   endpoint: string;
   client: Client;
   tools: LocalTool[];
 }
 
-interface ToolRoute {
-  publicName: string;
-  sourceName: string;
-  endpoint: string;
-  client: Client;
-  tool: LocalTool;
-  server: ConnectedServer;
+interface ConnectedServer extends ConnectedServerCandidate {
+  id: string;
+  name: string;
 }
 
 interface PersistedDiscovery {
@@ -71,9 +68,8 @@ export interface LocalMcpDiscoveryOptions {
 export interface LocalMcpSummary {
   serverCount: number;
   toolCount: number;
-  duplicateToolNames: string[];
   lastDiscoveryAt: string | null;
-  servers: Array<{ name?: string; endpoint: string; toolCount: number }>;
+  servers: Array<{ id: string; name: string; endpoint: string; toolCount: number }>;
 }
 
 const DEFAULT_PORT_SPEC = "1-65535";
@@ -296,11 +292,18 @@ export function parsePortSpec(spec: string): number[] {
   return [...ports].sort((a, b) => a - b);
 }
 
-function endpointAlias(endpoint: string): string {
+function endpointName(endpoint: string): string {
   const url = new URL(endpoint);
-  const host = url.hostname.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "local";
-  const port = url.port || "80";
-  return `mcp_${host}_${port}`;
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (["mcp", "sse", "rpc"].includes((segments.at(-1) ?? "").toLowerCase())) segments.pop();
+  const name = segments.at(-1)?.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return name?.slice(0, 48) || "local-mcp";
+}
+
+function endpointAlias(endpoint: string): string {
+  const name = endpointName(endpoint);
+  const suffix = createHash("sha256").update(endpoint).digest("hex").slice(0, 10);
+  return `${name}__${suffix}`;
 }
 
 function sanitizeToolName(name: string): string {
@@ -386,8 +389,6 @@ export class LocalMcpRegistry {
       "connectTimeoutMs" | "probeTimeoutMs" | "probeConcurrency">
   > & { servers: LocalMcpServerConfig[] };
   private servers: ConnectedServer[] = [];
-  private routes = new Map<string, ToolRoute>();
-  private duplicates: string[] = [];
   private lastDiscoveryAt: string | null = null;
 
   constructor(opts: { workspaceId: string; logger: Logger; discovery?: LocalMcpDiscoveryOptions }) {
@@ -441,7 +442,7 @@ export class LocalMcpRegistry {
     } satisfies PersistedDiscovery);
   }
 
-  private async connectEndpoint(config: LocalMcpServerConfig): Promise<ConnectedServer | null> {
+  private async connectEndpoint(config: LocalMcpServerConfig): Promise<ConnectedServerCandidate | null> {
     let client: Client | null = null;
     try {
       let requestInit: RequestInit | undefined;
@@ -472,51 +473,30 @@ export class LocalMcpRegistry {
   private async replaceServers(configs: LocalMcpServerConfig[]): Promise<void> {
     const unique = mergeServerConfigs(configs);
     const connected = await mapLimit(unique, this.discovery.probeConcurrency, (config) => this.connectEndpoint(config));
-    const next = connected.filter((server): server is ConnectedServer => server !== null);
+    const next = this.assignConnectorIds(connected.filter((server): server is ConnectedServerCandidate => server !== null));
     const previous = this.servers;
     this.servers = next;
-    this.rebuildRoutes();
     await Promise.all(previous.map((server) => server.client.close().catch(() => undefined)));
   }
 
-  private rebuildRoutes(): void {
-    this.routes.clear();
-    const byName = new Map<string, Array<{ server: ConnectedServer; tool: LocalTool }>>();
-    for (const server of this.servers) {
-      for (const tool of server.tools) {
-        const list = byName.get(tool.name) ?? [];
-        list.push({ server, tool });
-        byName.set(tool.name, list);
-      }
-    }
-    this.duplicates = [...byName.entries()].filter(([, entries]) => entries.length > 1).map(([name]) => name).sort();
+  private assignConnectorIds(servers: ConnectedServerCandidate[]): ConnectedServer[] {
+    const ordered = [...servers].sort((a, b) => a.endpoint.localeCompare(b.endpoint));
+    const baseIds = ordered.map((server) => server.config.name ?? endpointAlias(server.endpoint));
+    const counts = new Map<string, number>();
+    for (const base of baseIds) counts.set(base, (counts.get(base) ?? 0) + 1);
     const used = new Set<string>();
-    for (const [sourceName, entries] of byName) {
-      for (const entry of entries) {
-        let publicName = entries.length === 1
-          ? sourceName
-          : `${endpointAlias(entry.server.endpoint)}__${sanitizeToolName(sourceName)}`;
-        if (entry.server.config.name) {
-          publicName = `${sanitizeToolName(entry.server.config.name)}__${sanitizeToolName(sourceName)}`;
-        }
-        publicName = publicName.slice(0, 128);
-        let suffix = 2;
-        const base = publicName;
-        while (used.has(publicName)) {
-          const tail = `_${suffix++}`;
-          publicName = `${base.slice(0, Math.max(1, 128 - tail.length))}${tail}`;
-        }
-        used.add(publicName);
-        this.routes.set(publicName, {
-          publicName,
-          sourceName,
-          endpoint: entry.server.endpoint,
-          client: entry.server.client,
-          tool: entry.tool,
-          server: entry.server,
-        });
+    return ordered.map((server, index) => {
+      const base = sanitizeToolName(baseIds[index]).slice(0, 96) || "local_mcp";
+      let id = (counts.get(baseIds[index]) ?? 0) > 1
+        ? `${base}__${endpointAlias(server.endpoint)}`
+        : base;
+      if (used.has(id)) {
+        const suffix = createHash("sha256").update(server.endpoint).digest("hex").slice(0, 10);
+        id = `${id.slice(0, 110)}__${suffix}`;
       }
-    }
+      used.add(id);
+      return { ...server, id, name: server.config.name ?? endpointName(server.endpoint) };
+    });
   }
 
   async restore(): Promise<LocalMcpSummary> {
@@ -547,16 +527,32 @@ export class LocalMcpRegistry {
     return summary;
   }
 
-  listTools(): LocalTool[] {
-    return [...this.routes.values()].map((route) => ({ ...route.tool, name: route.publicName }));
+  getServer(id: string): LocalMcpSummary["servers"][number] | undefined {
+    const server = this.servers.find((candidate) => candidate.id === id);
+    if (!server) return undefined;
+    return {
+      id: server.id,
+      name: server.name,
+      endpoint: server.endpoint,
+      toolCount: server.tools.length,
+    };
   }
 
-  async callTool(name: string, args: Record<string, unknown> | undefined): Promise<unknown> {
-    const route = this.routes.get(name);
-    if (!route) throw new Error(`Unknown local MCP tool: ${name}`);
+  async listTools(serverId: string): Promise<LocalTool[]> {
+    const server = this.servers.find((candidate) => candidate.id === serverId);
+    if (!server) throw new Error(`Unknown local MCP server: ${serverId}`);
+    server.tools = await readAllTools(server.client);
+    return server.tools.map((tool) => ({ ...tool }));
+  }
+
+  async callTool(serverId: string, name: string, args: Record<string, unknown> | undefined): Promise<unknown> {
+    const server = this.servers.find((candidate) => candidate.id === serverId);
+    if (!server) throw new Error(`Unknown local MCP server: ${serverId}`);
+    const tool = server.tools.find((candidate) => candidate.name === name);
+    if (!tool) throw new Error(`Unknown tool for local MCP server ${serverId}: ${name}`);
     try {
-      const result: unknown = await route.client.callTool({ name: route.sourceName, arguments: args ?? {} });
-      const imageBlocks = await imageBlocksFromArtifacts(result, route.server.config.imageArtifactPathMappings ?? []);
+      const result: unknown = await server.client.callTool({ name: tool.name, arguments: args ?? {} });
+      const imageBlocks = await imageBlocksFromArtifacts(result, server.config.imageArtifactPathMappings ?? []);
       if (imageBlocks.length > 0 && isRecord(result) && Array.isArray(result.content)) {
         return { ...result, content: [...result.content, ...imageBlocks] };
       }
@@ -564,7 +560,7 @@ export class LocalMcpRegistry {
     } catch (error) {
       this.logger.warn("Local MCP tool call failed", {
         name,
-        endpoint: route.endpoint,
+        endpoint: server.endpoint,
         message: error instanceof Error ? error.message : String(error),
       });
       throw error;
@@ -574,11 +570,11 @@ export class LocalMcpRegistry {
   summary(): LocalMcpSummary {
     return {
       serverCount: this.servers.length,
-      toolCount: this.routes.size,
-      duplicateToolNames: [...this.duplicates],
+      toolCount: this.servers.reduce((count, server) => count + server.tools.length, 0),
       lastDiscoveryAt: this.lastDiscoveryAt,
       servers: this.servers.map((server) => ({
-        ...(server.config.name ? { name: server.config.name } : {}),
+        id: server.id,
+        name: server.name,
         endpoint: server.endpoint,
         toolCount: server.tools.length,
       })),
@@ -588,7 +584,6 @@ export class LocalMcpRegistry {
   async close(): Promise<void> {
     const servers = this.servers;
     this.servers = [];
-    this.routes.clear();
     await Promise.all(servers.map((server) => server.client.close().catch(() => undefined)));
   }
 }

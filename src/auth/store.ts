@@ -35,6 +35,7 @@ export interface TokenRecord {
   clientId: string;
   workspaceId: string;
   scopes: string[];
+  resource?: string;
   issuedAt: number;
   expiresAt: number;
   revoked: boolean;
@@ -165,6 +166,7 @@ export class AuthStore {
     clientId: string;
     scopes: string[];
     workspaceId?: string;
+    resource?: string;
     accessTtlMs?: number;
   }): { accessToken: string; refreshToken: string | null; expiresIn: number; scopes: string[] } {
     const now = Date.now();
@@ -178,6 +180,7 @@ export class AuthStore {
       clientId: input.clientId,
       workspaceId,
       scopes: input.scopes,
+      ...(input.resource ? { resource: input.resource } : {}),
       issuedAt: now,
       expiresAt: now + accessTtl,
       revoked: false,
@@ -231,6 +234,7 @@ export class AuthStore {
       clientId,
       scopes: record.scopes,
       workspaceId: record.workspaceId,
+      resource: record.resource,
     });
     return { ok: true, tokens };
   }

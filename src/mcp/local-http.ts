@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { Logger } from "../logger/index.js";
-import { PRODUCT_NAME, VERSION } from "../version.js";
+import { VERSION } from "../version.js";
 import type { LocalMcpRegistry } from "./local-registry.js";
 
 interface RpcRequest {
@@ -23,7 +23,10 @@ function rpcResult(id: unknown, result: unknown): Record<string, unknown> {
   return { jsonrpc: "2.0", id: id ?? null, result };
 }
 
-export function createLocalMcpHttpHandler(registry: LocalMcpRegistry, logger: Logger) {
+export function createLocalMcpHttpHandler(registry: LocalMcpRegistry, logger: Logger, serverId: string) {
+  const server = registry.getServer(serverId);
+  if (!server) throw new Error(`Unknown local MCP server: ${serverId}`);
+
   const handleMessage = async (message: RpcRequest): Promise<Record<string, unknown> | null> => {
     const id = message.id;
     if (typeof message.method !== "string") return rpcError(id, -32600, "Invalid JSON-RPC request.");
@@ -34,21 +37,32 @@ export function createLocalMcpHttpHandler(registry: LocalMcpRegistry, logger: Lo
       return rpcResult(id, {
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: `${PRODUCT_NAME} Local MCP`, version: VERSION },
-        instructions: "Tools are dynamically aggregated from local Streamable HTTP MCP servers discovered during setup.",
+        serverInfo: { name: server.name, version: VERSION },
+        instructions: `Tools are provided by the configured local MCP server ${server.name}.`,
       });
     }
     if (message.method === "ping") return rpcResult(id, {});
-    if (message.method === "tools/list") return rpcResult(id, { tools: registry.listTools() });
+    if (message.method === "tools/list") {
+      try {
+        return rpcResult(id, { tools: await registry.listTools(serverId) });
+      } catch (error) {
+        logger.warn("Local MCP tools/list failed", {
+          serverId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return rpcError(id, -32010, error instanceof Error ? error.message : "Local MCP tools/list failed.");
+      }
+    }
     if (message.method === "tools/call") {
       const params = isRecord(message.params) ? message.params : null;
       const name = params && typeof params.name === "string" ? params.name : null;
       if (!name) return rpcError(id, -32602, "tools/call requires a tool name.");
       const args = params && isRecord(params.arguments) ? params.arguments : undefined;
       try {
-        return rpcResult(id, await registry.callTool(name, args));
+        return rpcResult(id, await registry.callTool(serverId, name, args));
       } catch (error) {
-        logger.warn("Aggregated local MCP tool call failed", {
+        logger.warn("Local MCP tool call failed", {
+          serverId,
           name,
           message: error instanceof Error ? error.message : String(error),
         });

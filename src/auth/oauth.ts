@@ -11,6 +11,7 @@ export interface OAuthDeps {
   pairing: PairingManager;
   workspaceName: string;
   getBaseUrl: (req: Request) => string;
+  getMcpService: (serverId: string) => { id: string; name: string } | undefined;
   logger: Logger;
 }
 
@@ -22,6 +23,8 @@ interface PendingAuthRequest {
   state?: string;
   codeChallenge: string;
   resource?: string;
+  serverId: string;
+  serverName: string;
   expiresAt: number;
 }
 
@@ -55,24 +58,50 @@ function authorizationServerMetadata(base: string): Record<string, unknown> {
   };
 }
 
-function protectedResourceMetadata(base: string): Record<string, unknown> {
+function protectedResourceMetadata(base: string, server: { id: string; name: string }): Record<string, unknown> {
   return {
-    resource: `${base}/mcp`,
+    resource: `${base.replace(/\/+$/, "")}/mcp/${encodeURIComponent(server.id)}`,
     authorization_servers: [base],
     scopes_supported: [...SUPPORTED_SCOPES],
     bearer_methods_supported: ["header"],
-    resource_name: PRODUCT_NAME,
+    resource_name: server.name,
   };
+}
+
+function resolveResource(
+  value: string | undefined,
+  base: string,
+  getMcpService: OAuthDeps["getMcpService"]
+): { uri: string; serverId: string; serverName: string } | null {
+  if (!value) return null;
+  try {
+    const resourceUrl = new URL(value);
+    const baseUrl = new URL(base);
+    const basePath = baseUrl.pathname.replace(/\/+$/, "");
+    const prefix = `${basePath}/mcp/`;
+    if (resourceUrl.origin !== baseUrl.origin || resourceUrl.search || resourceUrl.hash) return null;
+    if (!resourceUrl.pathname.startsWith(prefix)) return null;
+    const encodedServerId = resourceUrl.pathname.slice(prefix.length);
+    if (!encodedServerId || encodedServerId.includes("/")) return null;
+    const server = getMcpService(decodeURIComponent(encodedServerId));
+    if (!server) return null;
+    const uri = `${base.replace(/\/+$/, "")}/mcp/${encodeURIComponent(server.id)}`;
+    if (`${resourceUrl.origin}${resourceUrl.pathname.replace(/\/+$/, "")}` !== uri) return null;
+    return { uri, serverId: server.id, serverName: server.name };
+  } catch {
+    return null;
+  }
 }
 
 function pairingPage(opts: {
   requestId: string;
   workspaceName: string;
+  serverName: string;
   scopes: string[];
   error?: string;
 }): string {
   const scopeLabels: Record<string, string> = {
-    "mcp.tools": "Use tools discovered from local Streamable HTTP MCP servers",
+    "mcp.tools": `Use tools from the local MCP server ${opts.serverName}`,
     offline_access: "Stay connected between sessions",
   };
   const scopeList = opts.scopes
@@ -83,6 +112,7 @@ function pairingPage(opts: {
     : "";
   const escapedProductName = escapeHtml(PRODUCT_NAME);
   const escapedWorkspaceName = escapeHtml(opts.workspaceName);
+  const escapedServerName = escapeHtml(opts.serverName);
   const escapedRequestId = escapeHtml(opts.requestId);
   return `<!doctype html>
 <html lang="en">
@@ -116,7 +146,7 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${escapedProductName}</h1>
-  <p class="sub">ChatGPT is requesting access to local MCP tools through <strong>${escapedWorkspaceName}</strong>:</p>
+  <p class="sub">ChatGPT is requesting access to <strong>${escapedServerName}</strong> through <strong>${escapedWorkspaceName}</strong>:</p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
     <input type="hidden" name="request_id" value="${escapedRequestId}">
@@ -147,14 +177,17 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   const asMetadataHandler = (req: Request, res: Response): void => {
     res.json(authorizationServerMetadata(deps.getBaseUrl(req)));
   };
-  const prMetadataHandler = (req: Request, res: Response): void => {
-    res.json(protectedResourceMetadata(deps.getBaseUrl(req)));
-  };
   router.get("/.well-known/oauth-authorization-server", asMetadataHandler);
   router.get("/.well-known/oauth-authorization-server/mcp", asMetadataHandler);
   router.get("/.well-known/openid-configuration", asMetadataHandler);
-  router.get("/.well-known/oauth-protected-resource", prMetadataHandler);
-  router.get("/.well-known/oauth-protected-resource/mcp", prMetadataHandler);
+  router.get("/.well-known/oauth-protected-resource/mcp/:serverId", (req, res) => {
+    const server = deps.getMcpService(req.params.serverId);
+    if (!server) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    res.json(protectedResourceMetadata(deps.getBaseUrl(req), server));
+  });
 
   // ---- Dynamic Client Registration (RFC 7591) ------------------------------
 
@@ -218,6 +251,11 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       fail("invalid_request", "PKCE with S256 is required");
       return;
     }
+    const target = resolveResource(query.resource, deps.getBaseUrl(req), deps.getMcpService);
+    if (!target) {
+      fail("invalid_target", "resource must identify a configured local MCP service");
+      return;
+    }
     const requestedScopes = query.scope?.split(/[\s+]+/).filter(Boolean) ?? [];
     const unsupportedScopes = requestedScopes.filter(
       (scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope)
@@ -234,7 +272,9 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       scopes,
       state: query.state,
       codeChallenge: query.code_challenge,
-      resource: query.resource,
+      resource: target.uri,
+      serverId: target.serverId,
+      serverName: target.serverName,
       expiresAt: Date.now() + 10 * 60_000,
     };
     pendingRequests.set(request.id, request);
@@ -242,7 +282,12 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     res
       .status(200)
       .type("html")
-      .send(pairingPage({ requestId: request.id, workspaceName: deps.workspaceName, scopes }));
+      .send(pairingPage({
+        requestId: request.id,
+        workspaceName: deps.workspaceName,
+        serverName: request.serverName,
+        scopes,
+      }));
   });
 
   router.post("/oauth/authorize", urlencoded({ extended: false }), (req, res) => {
@@ -254,7 +299,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
       return;
     }
-    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip);
+    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip, request.serverId);
     if (!verdict.ok) {
       const messages: Record<string, string> = {
         invalid: `Incorrect pairing code.${verdict.attemptsLeft !== undefined ? ` ${verdict.attemptsLeft} attempts left.` : ""}`,
@@ -272,6 +317,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
           pairingPage({
             requestId: request.id,
             workspaceName: deps.workspaceName,
+            serverName: request.serverName,
             scopes: request.scopes,
             error: messages[verdict.reason] ?? "Verification failed.",
           })
@@ -320,7 +366,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
         return;
       }
-      const tokens = deps.store.issueTokens({ clientId, scopes: record.scopes });
+      const tokens = deps.store.issueTokens({ clientId, scopes: record.scopes, resource: record.resource });
       deps.logger.info(`Issued access token for client ${clientId}`);
       res.json({
         access_token: tokens.accessToken,

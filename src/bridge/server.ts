@@ -131,19 +131,47 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       pairing,
       workspaceName: workspace.name,
       getBaseUrl,
+      getMcpService: (serverId) => {
+        const service = localMcp.getServer(serverId);
+        return service ? { id: service.id, name: service.name } : undefined;
+      },
       logger,
     })
   );
 
-  // ---- MCP endpoint (bearer-protected) --------------------------------------
+  // ---- One independent MCP resource per configured local server -------------
 
-  const mcpHandler = createLocalMcpHttpHandler(localMcp, logger);
+  const getServerId = (req: Request): string => {
+    const value = req.params.serverId;
+    return Array.isArray(value) ? value[0] ?? "" : value;
+  };
+  const serviceResource = (req: Request): string =>
+    `${getBaseUrl(req).replace(/\/+$/, "")}/mcp/${encodeURIComponent(getServerId(req))}`;
+  const serviceResourceMetadata = (req: Request): string =>
+    `${getBaseUrl(req).replace(/\/+$/, "")}/.well-known/oauth-protected-resource/mcp/${encodeURIComponent(getServerId(req))}`;
   app.all(
-    "/mcp",
+    "/mcp/:serverId",
     express.json({ limit: "8mb" }),
-    bearerAuth({ store: authStore, workspaceId: workspace.id, getBaseUrl, logger }),
+    (req: Request, res: Response, next: NextFunction) => {
+      if (!localMcp.getServer(getServerId(req))) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      next();
+    },
+    bearerAuth({
+      store: authStore,
+      workspaceId: workspace.id,
+      expectedResource: serviceResource,
+      getResourceMetadataUrl: serviceResourceMetadata,
+      logger,
+    }),
     (req: Request, res: Response) => {
-      void mcpHandler(req, res);
+      try {
+        void createLocalMcpHttpHandler(localMcp, logger, getServerId(req))(req, res);
+      } catch {
+        res.status(404).json({ error: "not_found" });
+      }
     }
   );
 
@@ -163,10 +191,15 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     next();
   };
 
-  app.post("/admin/pairing", adminGuard, (_req, res) => {
-    const session = pairing.create();
-    logger.info("Created pairing session");
-    res.json({ code: session.code, expiresAt: session.expiresAt });
+  app.post("/admin/pairing/:serverId", adminGuard, (req, res) => {
+    const service = localMcp.getServer(getServerId(req));
+    if (!service) {
+      res.status(404).json({ error: "Unknown local MCP server." });
+      return;
+    }
+    const session = pairing.create(service.id);
+    logger.info("Created service-specific pairing session", { serverId: service.id });
+    res.json({ code: session.code, expiresAt: session.expiresAt, serverId: service.id, serverName: service.name });
   });
 
   app.get("/admin/info", adminGuard, (_req, res) => {

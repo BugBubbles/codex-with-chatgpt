@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import express from "express";
+import type { Server } from "node:http";
 import path from "node:path";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
 import { makeTmpDir, cleanup, write, isolateStateDir, pkceVerifierAndChallenge } from "./helpers.js";
@@ -6,6 +8,10 @@ import { makeTmpDir, cleanup, write, isolateStateDir, pkceVerifierAndChallenge }
 let root: string;
 let bridge: Bridge;
 let base: string;
+let mcpServer: Server;
+let upstreamEndpoint = "";
+const serviceId = "oauth-test";
+let resource = "";
 
 const REDIRECT_URI = "http://127.0.0.1:19999/callback";
 
@@ -13,17 +19,49 @@ beforeAll(async () => {
   isolateStateDir();
   root = makeTmpDir("oauth-ws");
   write(root, "hello.txt", "hello oauth\n");
+  const app = express();
+  app.use(express.json());
+  app.post("/mcp", (req, res) => {
+    const body = req.body as { id?: unknown; method?: string };
+    if (body.method === "initialize") {
+      res.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: serviceId, version: "1.0.0" } },
+      });
+    } else if (body.method === "notifications/initialized" || body.method === "notifications/cancelled") {
+      res.status(202).end();
+    } else if (body.method === "tools/list") {
+      res.json({ jsonrpc: "2.0", id: body.id, result: { tools: [] } });
+    } else if (body.method === "ping") {
+      res.json({ jsonrpc: "2.0", id: body.id, result: {} });
+    } else {
+      res.json({ jsonrpc: "2.0", id: body.id ?? null, error: { code: -32601, message: "Method not found" } });
+    }
+  });
+  mcpServer = await new Promise<Server>((resolve) => {
+    const server = app.listen(0, "127.0.0.1", () => resolve(server));
+  });
+  const address = mcpServer.address();
+  if (!address || typeof address === "string") throw new Error("fake MCP server failed to bind");
+  upstreamEndpoint = `http://127.0.0.1:${address.port}/mcp`;
   bridge = await startBridge({
     workspaceRoot: root,
     port: 0,
     persistRuntime: false,
     authStoreFile: path.join(makeTmpDir("auth"), "store.json"),
+    localMcpDiscovery: {
+      autoDiscover: false,
+      servers: [{ name: serviceId, endpoint: upstreamEndpoint }],
+    },
   });
   base = bridge.localBaseUrl();
+  resource = `${base}/mcp/${serviceId}`;
 });
 
 afterAll(async () => {
   await bridge.close();
+  await new Promise<void>((resolve) => mcpServer.close(() => resolve()));
   cleanup(root);
 });
 
@@ -52,6 +90,7 @@ async function authorizeWithPairing(
   authorizeUrl.searchParams.set("code_challenge", challenge);
   authorizeUrl.searchParams.set("code_challenge_method", "S256");
   authorizeUrl.searchParams.set("scope", "mcp.tools offline_access");
+  authorizeUrl.searchParams.set("resource", resource);
 
   const pageResponse = await fetch(authorizeUrl, { redirect: "manual" });
   const html = await pageResponse.text();
@@ -93,10 +132,11 @@ async function exchangeToken(
 
 describe("discovery metadata", () => {
   it("serves protected resource metadata", async () => {
-    const response = await fetch(`${base}/.well-known/oauth-protected-resource/mcp`);
+    const response = await fetch(`${base}/.well-known/oauth-protected-resource/mcp/${serviceId}`);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { resource: string; authorization_servers: string[]; scopes_supported: string[] };
-    expect(body.resource).toContain("/mcp");
+    const body = (await response.json()) as { resource: string; resource_name: string; authorization_servers: string[]; scopes_supported: string[] };
+    expect(body.resource).toBe(resource);
+    expect(body.resource_name).toBe(serviceId);
     expect(body.authorization_servers.length).toBe(1);
     expect(body.scopes_supported).toEqual(["mcp.tools", "offline_access"]);
   });
@@ -115,7 +155,7 @@ describe("authorization + token flow", () => {
   it("completes the full pairing + PKCE flow and calls MCP", async () => {
     const clientId = await registerClient();
     const { verifier, challenge } = pkceVerifierAndChallenge();
-    const pairing = bridge.pairing.create();
+    const pairing = bridge.pairing.create(serviceId);
     const { code, location } = await authorizeWithPairing(clientId, challenge, pairing.code);
     expect(code).toBeTruthy();
     expect(location).toContain("state=st-123");
@@ -127,7 +167,7 @@ describe("authorization + token flow", () => {
     expect(token.body.token_type).toBe("Bearer");
 
     // authorized MCP request
-    const mcpResponse = await fetch(`${base}/mcp`, {
+    const mcpResponse = await fetch(resource, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -147,7 +187,7 @@ describe("authorization + token flow", () => {
   it("rejects a wrong pairing code", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();
-    bridge.pairing.create();
+    bridge.pairing.create(serviceId);
     const result = await authorizeWithPairing(clientId, challenge, "AAAA-AAAA");
     expect(result.code).toBeNull();
     expect(result.status).toBe(401);
@@ -162,6 +202,10 @@ describe("authorization + token flow", () => {
       port: 0,
       persistRuntime: false,
       authStoreFile: path.join(makeTmpDir("auth-html"), "store.json"),
+      localMcpDiscovery: {
+        autoDiscover: false,
+        servers: [{ name: serviceId, endpoint: upstreamEndpoint }],
+      },
     });
 
     try {
@@ -181,6 +225,7 @@ describe("authorization + token flow", () => {
       authorizeUrl.searchParams.set("response_type", "code");
       authorizeUrl.searchParams.set("code_challenge", challenge);
       authorizeUrl.searchParams.set("code_challenge_method", "S256");
+      authorizeUrl.searchParams.set("resource", `${xssBase}/mcp/${serviceId}`);
 
       const response = await fetch(authorizeUrl, { redirect: "manual" });
       expect(response.status).toBe(200);
@@ -203,6 +248,7 @@ describe("authorization + token flow", () => {
     authorizeUrl.searchParams.set("response_type", "code");
     authorizeUrl.searchParams.set("code_challenge", challenge);
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("resource", resource);
 
     const response = await fetch(authorizeUrl, { redirect: "manual" });
     expect(response.status).toBe(200);
@@ -218,7 +264,7 @@ describe("authorization + token flow", () => {
   it("rejects PKCE verifier mismatch", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();
-    const pairing = bridge.pairing.create();
+    const pairing = bridge.pairing.create(serviceId);
     const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
     const token = await exchangeToken(clientId, code!, "wrong-verifier-wrong-verifier-wrong");
     expect(token.status).toBe(400);
@@ -228,7 +274,7 @@ describe("authorization + token flow", () => {
   it("authorization codes are one-time", async () => {
     const clientId = await registerClient();
     const { verifier, challenge } = pkceVerifierAndChallenge();
-    const pairing = bridge.pairing.create();
+    const pairing = bridge.pairing.create(serviceId);
     const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
     const first = await exchangeToken(clientId, code!, verifier);
     expect(first.status).toBe(200);
@@ -246,6 +292,7 @@ describe("authorization + token flow", () => {
     authorizeUrl.searchParams.set("code_challenge", challenge);
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
     authorizeUrl.searchParams.set("scope", "totally.unknown.scope");
+    authorizeUrl.searchParams.set("resource", resource);
 
     const response = await fetch(authorizeUrl, { redirect: "manual" });
     expect(response.status).toBe(302);
@@ -274,9 +321,9 @@ describe("authorization + token flow", () => {
   });
 });
 
-describe("token enforcement on /mcp", () => {
+describe("token enforcement on a service-specific MCP resource", () => {
   const mcpCall = (token?: string): Promise<Response> =>
-    fetch(`${base}/mcp`, {
+    fetch(resource, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -301,6 +348,7 @@ describe("token enforcement on /mcp", () => {
     const expired = bridge.authStore.issueTokens({
       clientId: "test",
       scopes: ["mcp.tools"],
+      resource,
       accessTtlMs: -1000,
     });
     const response = await mcpCall(expired.accessToken);
@@ -312,13 +360,14 @@ describe("token enforcement on /mcp", () => {
       clientId: "test",
       scopes: ["mcp.tools"],
       workspaceId: "deadbeef0000",
+      resource,
     });
     const response = await mcpCall(foreign.accessToken);
     expect(response.status).toBe(403);
   });
 
   it("401 after revocation", async () => {
-    const tokens = bridge.authStore.issueTokens({ clientId: "test", scopes: ["mcp.tools"] });
+    const tokens = bridge.authStore.issueTokens({ clientId: "test", scopes: ["mcp.tools"], resource });
     expect((await mcpCall(tokens.accessToken)).status).toBe(200);
     bridge.authStore.revokeToken(tokens.accessToken);
     expect((await mcpCall(tokens.accessToken)).status).toBe(401);
@@ -329,7 +378,7 @@ describe("refresh token rotation", () => {
   it("rotates refresh tokens and invalidates the old one", async () => {
     const clientId = await registerClient();
     const { verifier, challenge } = pkceVerifierAndChallenge();
-    const pairing = bridge.pairing.create();
+    const pairing = bridge.pairing.create(serviceId);
     const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
     const initial = await exchangeToken(clientId, code!, verifier);
 

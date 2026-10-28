@@ -3,7 +3,7 @@ import { parsePortSpec } from "../src/mcp/local-registry.js";
 
 describe("local MCP port configuration", () => {
   it("accepts arbitrary ports and ranges instead of a fixed port allow-list", () => {
-    expect(parsePortSpec("23120,3000-3002,65535")).toEqual([3000, 3001, 3002, 23120, 65535]);
+    expect(parsePortSpec("24567,3000-3002,65535")).toEqual([3000, 3001, 3002, 24567, 65535]);
   });
 
   it("rejects invalid port specifications", () => {

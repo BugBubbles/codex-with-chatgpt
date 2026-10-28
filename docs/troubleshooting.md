@@ -21,17 +21,15 @@ again. The local process may still be running.
 
 ### Everything was quit and ChatGPT can no longer connect
 Quitting Codex / the terminal stops the public address. The next `c2c doctor`
-starts a new address and sets `chatgptRepair.needed`. The Skill should tell the
-user that the old address expired, then **Delete** THIS workspace's
-connector (`chatgptRepair.connectorName`) and create it again with the new
-address (never click Reconnect — the old URL is dead). Other workspaces keep
-their own connectors so two projects can stay connected at once.
+starts a new address and reports each affected item in
+`chatgptRepair.connectors`. Delete and recreate each affected service connector
+with its new URL (never click Reconnect — the old URL is dead). Other
+workspaces keep their own connectors.
 
-Mint the pairing code only when the ChatGPT Authorize form is on screen
-(`c2c pair`). After the connector is recreated, doctor being green is not
-enough: the saved ChatGPT conversation must pass `workspace_info` again. If
-that old chat still cannot read the workspace, open a new chat in the same
-Project (or switch long-chat) and continue there.
+Mint a code only when that service's ChatGPT Authorize form is open:
+`c2c pair --server <id>`. Each one-time code authorizes only that service.
+After reconnecting, test a tool supplied by each MCP connector; this branch no
+longer exposes `workspace_info`.
 
 Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
 
@@ -41,9 +39,9 @@ Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
   https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins
 
 ### Tunnel URL unreachable / ChatGPT says the connector is broken
-Same as above: `c2c doctor`, then Delete + recreate THIS workspace's
-connector if `chatgptRepair.needed`. Mint a pairing code with `c2c pair` only
-when the Authorize form is on screen.
+Same as above: `c2c doctor`, then delete and recreate each connector listed in
+`chatgptRepair.connectors`. Mint its code with `c2c pair --server <id>` only
+when that service's Authorize form is on screen.
 If this workspace uses a stable hostname, doctor sets `namedRepair` instead —
 re-login to Cloudflare (`c2c tunnel login`) and doctor again. Do not Delete
 the connector; the address did not change.
@@ -60,7 +58,7 @@ Pairing codes are one-time and expire after ~5 minutes. Generate one only
 when the ChatGPT Authorize page is ready:
 
 ```
-c2c pair
+c2c pair --server <id>
 ```
 
 Older codes become invalid immediately. Do not mint a code during `c2c doctor`.
@@ -72,9 +70,10 @@ Leave it unset to keep cloudflared's default.
 
 ### ChatGPT gets 401 on every tool call
 The access token expired and refresh failed (e.g. after `c2c unpair` or a
-long offline period). Delete THIS workspace's connector if the address also
-changed; otherwise run Authorize again in ChatGPT and enter a fresh pairing
-code. Never use Reconnect when the public address has been replaced.
+long offline period). Delete and recreate the affected service connector if
+its address also changed; otherwise run Authorize again in ChatGPT and enter a
+fresh service-specific pairing code. Never use Reconnect when the public
+address has been replaced.
 
 ### cloudflared is not installed
 macOS: `brew install cloudflared`
@@ -113,7 +112,7 @@ collection page is open (`https://chatgpt.com/g/g-p-…/project`).
 ### This workspace opened the wrong ChatGPT Project
 Do not pick another project by name automatically. Open the collection that
 matches this workspace and tell Codex「已找到」, or say you want the old
-long-chat instead. Each workspace has its own Project and its own connector.
+long-chat instead. Each workspace has its own Project and its own service connectors.
 
 ### Completely stuck
 ```
@@ -121,5 +120,6 @@ c2c stop
 c2c setup
 ```
 
-re-creates the bridge, tunnel and pairing session from scratch. Existing
-authorizations stay valid unless you also ran `c2c unpair`.
+re-creates the bridge and tunnel, then lists one connector per discovered
+service. Authorize each one with its own `c2c pair --server <id>` code.
+Existing authorizations stay valid unless you also ran `c2c unpair`.

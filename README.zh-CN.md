@@ -1,8 +1,16 @@
 # Codex with ChatGPT — local-mcp 分支
 
-这个分支把原有的 OAuth、配对码和 Cloudflare Tunnel 变成一个**本地 Streamable HTTP MCP 聚合桥**。
+此分支为每个本地 Streamable HTTP MCP 服务提供一个独立的 ChatGPT OAuth 插件。不会把多个服务的工具合并进同一个插件，也不会暴露 C2C 自带的 workspace、Git、Python 或执行工具。
 
-它不再把 workspace、Git、Python、Conda 或 Codex 工具暴露给远程网页。执行 `c2c setup` 时，Bridge 会自动扫描本机 loopback 上正在监听的端口，尝试连接其中的 Streamable HTTP MCP 服务并读取它们的 `tools/list`。远程 ChatGPT 看到的是实际发现到的本地 MCP 工具，而不是代码里预先写死的一组工具或端口。
+运行 `c2c setup` 后，Bridge 会发现本机 loopback 上的 MCP 服务，并为每个服务输出独立 URL，例如 `https://<隧道域名>/mcp/llm-for-zotero`。ChatGPT 请求 `tools/list` 时，Bridge 会从该 URL 对应的本地 MCP 服务读取最新工具定义，并原样返回工具名，不加前缀、不改写。没有配置 `name` 的服务会根据 endpoint 生成稳定 ID。
+
+在 ChatGPT 中为列表里的每个 URL 分别添加 OAuth 插件。打开某个插件的授权页后，为对应服务生成一次性配对码：
+
+```bash
+c2c pair --server <id>
+```
+
+每个插件的配对码和 OAuth token 只允许访问对应 MCP 服务。请逐个完成授权。旧的汇总地址 `/mcp` 已不再提供工具；添加完独立插件后，请从 ChatGPT 删除旧汇总插件。
 
 ## 使用
 
@@ -13,33 +21,25 @@ corepack pnpm build
 c2c setup -w <用于保存连接状态的本地目录>
 ```
 
-配置输出会显示发现了多少个本地 MCP 服务和工具，然后给出公网 MCP 地址与配对码。
-
 默认自动发现：
 
 - host：`127.0.0.1`
-- port：完整的 `1-65535`
+- port：`1-65535`
 - path：`/mcp`
-
-这里的端口不是 allow-list；扫描范围可以自由调整。自定义 path、IPv6-only 服务或不希望扫描的场景，也可以通过显式 endpoint 配置。
 
 ## 可选发现配置
 
-以下环境变量不是必须的，只用于加速扫描或覆盖特殊本地部署：
-
-- `C2C_LOCAL_MCP_ENDPOINTS`：逗号或分号分隔的完整 loopback URL，例如 `http://127.0.0.1:23120/mcp;http://127.0.0.1:8765/custom`
-- `C2C_LOCAL_MCP_HOSTS`：默认 `127.0.0.1`；需要 IPv6 时可加入 `::1`
-- `C2C_LOCAL_MCP_PORTS`：例如 `3000,5173,8000-9000,23120`；默认 `1-65535`
-- `C2C_LOCAL_MCP_PATHS`：自动扫描开放端口时尝试的 path，默认 `/mcp`
-- `C2C_LOCAL_MCP_SCAN_CONCURRENCY`：TCP 端口扫描并发
-- `C2C_LOCAL_MCP_CONNECT_TIMEOUT_MS`：TCP 探测超时
-- `C2C_LOCAL_MCP_PROBE_TIMEOUT_MS`：MCP initialize / tools/list 探测超时
-- `C2C_LOCAL_MCP_PROBE_CONCURRENCY`：MCP 端点探测并发
+- `C2C_LOCAL_MCP_ENDPOINTS`：分号或逗号分隔的 loopback URL，例如 `http://127.0.0.1:8765/mcp;http://127.0.0.1:9000/custom`
+- `C2C_LOCAL_MCP_HOSTS`：默认 `127.0.0.1`
+- `C2C_LOCAL_MCP_PORTS`：例如 `3000,5173,8000-9000,9999`
+- `C2C_LOCAL_MCP_PATHS`：默认 `/mcp`
+- `C2C_LOCAL_MCP_SCAN_CONCURRENCY`
+- `C2C_LOCAL_MCP_CONNECT_TIMEOUT_MS`
+- `C2C_LOCAL_MCP_PROBE_TIMEOUT_MS`
+- `C2C_LOCAL_MCP_PROBE_CONCURRENCY`
 - `C2C_LOCAL_MCP_SERVERS`：具名服务的 JSON 配置；支持用环境变量名引用 Bearer token
 
-显式 endpoint 必须是本机 loopback HTTP 地址，但端口和 path 不受代码中的固定列表限制。
-
-具名 Streamable HTTP 服务可以这样配置：
+具名服务配置示例：
 
 ```json
 [
@@ -57,27 +57,16 @@ c2c setup -w <用于保存连接状态的本地目录>
 ]
 ```
 
-`bearerTokenEnv` 只保存环境变量名，Bearer token 本身不会写入状态文件。服务名会作为工具名前缀，例如 `llm-for-zotero__paper_read`。图像 artifact 只会从显式映射的目录读取，并作为标准 MCP image 内容块转发。
+`bearerTokenEnv` 只保存环境变量名，token 本身不会写入状态文件。服务名用于该插件的 URL 路径和推荐名称。工具名与原始 MCP 接口完全一致；调用时也使用同一个原名转发。图像 artifact 按显式目录映射读取，并作为标准 MCP image block 返回。
 
-## 多 MCP 聚合
+多个服务共用同一个本地 Bridge 和 Cloudflare 隧道，但分别使用 `/mcp/<id>` 路径。工具调用只路由到 URL 对应的服务；同名工具可以在不同插件中各自保留原名。写工具的 schema 和调用结果也由对应服务原样提供并转发。
 
-多个本地 MCP 可以同时存在。工具名全局唯一时会原样暴露；如果不同 MCP 提供相同工具名，Bridge 会只对冲突项自动生成带来源的稳定别名，从而保证所有工具都能被远程调用，而不是静默覆盖其中一个。
-
-具名 MCP 的所有工具会使用服务名作为前缀；未命名的旧 endpoint 继续沿用原有名称和冲突处理规则。
-
-发现结果会保存在用户状态目录。Bridge 重启时会快速恢复已发现的 endpoint；再次运行 `c2c setup` 会重新扫描并刷新工具表。
+发现结果保存在用户状态目录。再次运行 `c2c setup` 会重新发现服务并输出最新插件 URL。服务增删后需重新运行 setup；工具定义则会在 ChatGPT 请求 `tools/list` 时从对应 MCP 更新。授权每个服务时，需在对应的 OAuth 授权页打开后运行 `c2c pair --server <id>`。
 
 ## 安全边界
 
-- 公网 OAuth Bearer Token 不会转发给任何本地 MCP。
-- 自动发现只扫描 loopback，不会把代理变成任意内网/公网 SSRF。
-- 公网 MCP 只暴露 `initialize`、`ping`、`tools/list`、`tools/call` 和必要通知；resources、prompts 等其他 MCP 能力不会透出。
-- 本地 MCP 的工具定义和调用结果由对应 MCP 服务本身负责。
-
-## 开发
-
-```bash
-corepack pnpm typecheck
-corepack pnpm test
-corepack pnpm build
-```
+- 每个 OAuth token 绑定到一个具体 MCP 资源，不能跨插件调用其他服务。
+- 本地 MCP 的 Bearer token 只用于 Bridge 到该本地 MCP 的连接，不会转发公网 OAuth token。
+- 自动发现只扫描 loopback 地址。
+- 每个公网 MCP 路径只代理对应服务提供的 `initialize`、`ping`、`tools/list`、`tools/call` 和通知；不会合并其他服务或 Bridge 内置工具。
+- 图像 artifact 只从显式配置的本地映射目录读取。

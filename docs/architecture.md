@@ -1,81 +1,56 @@
-# Architecture — python branch
+# Architecture — local MCP connectors
 
 ```text
-ChatGPT Web
-    |
-    | OAuth-protected MCP
-    v
-C2C Bridge (normal user authority)
-    |-- workspace read/search/git tools
-    |-- python_write_file
-    |-- conda_environments (read-only discovery)
-    |-- execution records/output sanitizer
-    |
-    +-- python_execute(environment=id?)
-           |
-           | resolve id -> discovered Conda prefix/python (optional)
-           | spawn selected python -I -S with reduced bootstrap env
-           v
-       Sandbox bootstrap
-           |-- host/affinity-aware numeric thread plan
-           |-- rlimit (UID task-count baseline)
-           |-- PR_SET_NO_NEW_PRIVS
-           |-- Landlock ABI 4+ filesystem/TCP policy
-           |-- seccomp syscall filter
-           |-- environment scrub
-           |-- verified fd-3 ready handshake
-           v
-       User Python
-           |-- workspace: read/write
-           |-- private temp: read/write
-           |-- Python runtime paths: read-only
-           |-- selected Conda prefix: read-only
-           |-- network: blocked
-           |-- external exec: blocked
-           +-- peer-process control: blocked
+ChatGPT connector A                       ChatGPT connector B
+        |                                          |
+        | /mcp/<service-id>                       | /mcp/<service-id>
+        +--------------------+---------------------+
+                             |
+                   shared OAuth + tunnel
+                             |
+                    C2C local MCP Bridge
+                    |-- OAuth resource metadata per service
+                    |-- token audience per service
+                    |-- one-time pairing code per service
+                    |-- tools/list and tools/call proxy
+                       |                       |
+               local MCP server A       local MCP server B
 ```
 
 ## Principles
 
-- ChatGPT may author source directly through `python_write_file` or generate Python for `python_execute`.
-- The bridge itself remains a normal local user process because it still needs OAuth/tunnel/workspace functionality.
-- The untrusted execution boundary is the child Python process, not the bridge.
-- Sandbox setup is fail-closed; there is no unsandboxed fallback.
-- Kernel policy, rather than AST/import blacklists, is the security boundary.
-- The connected workspace remains the writable trust boundary.
+- One connected local MCP server maps to one ChatGPT connector URL.
+- The bridge does not aggregate tool lists. Each resource forwards only the named server's original tool definitions and calls.
+- A server's configured `name` becomes its connector ID. Unnamed servers receive a stable ID derived from their loopback endpoint.
+- The same tunnel can serve multiple connectors through separate `/mcp/<id>` paths.
+- OAuth tokens and one-time pairing codes are bound to one MCP service. A token issued for one path cannot call another path.
+- The upstream service controls its tool schemas and behavior. The bridge forwards read and write tools without maintaining a separate fixed tool list.
+- Existing image blocks pass through. Configured image artifact path mappings are resolved locally and returned as standard MCP image blocks.
 
-## Python execution lifecycle
+## Request flow
 
-1. MCP validates `execution.write` scope and exactly one of inline `code` or workspace `.py` `path`.
-2. If `environment` is supplied, the bridge resolves only an exact id returned by read-only Conda discovery, rejects any prefix overlapping the workspace, and selects that environment's Python.
-3. The bridge canonicalizes file targets through `Workspace.resolve`.
-4. A private per-execution temp directory is created under the workspace.
-5. Python starts with `-I -S`; inline source is sent over stdin and is not executed yet.
-6. The bridge supplies the host logical/available CPU counts and a bounded numeric worker count; the bootstrap counts the current UID's Linux tasks, applies rlimits, then installs `no_new_privs`, Landlock and seccomp.
-7. The bootstrap replaces its environment and narrows `sys.path`.
-8. A JSON sandbox status is written to a dedicated inherited fd and that fd is closed.
-9. Only then is the inline source compiled/executed or the workspace file run via `runpy`.
-10. The Node parent enforces wall timeout and kills the process group if necessary.
-11. The private temp directory is removed, output is sanitized/stored, and git-visible per-execution changes are computed by comparing pre/post dirty-path snapshots; untouched pre-existing dirty files are excluded.
-12. `python_execute` returns the sandbox attestation alongside the normal execution result.
+1. Setup discovers local Streamable HTTP MCP services and reads each service's full paginated `tools/list` result for status.
+2. Setup prints one connector URL per service.
+3. The client discovers service-specific protected-resource metadata and the shared OAuth authorization server.
+4. The user creates a one-time code for the selected service with `c2c pair --server <id>`.
+5. OAuth authorization binds the token to the selected `/mcp/<id>` resource.
+6. Each `tools/list` request fetches the selected service's current tool definitions. `tools/call` forwards the original tool name and arguments to that service.
 
-If sandbox setup fails, no user Python runs and the tool returns `PYTHON_SANDBOX_FAILED`.
+## Security boundaries
+
+- Local endpoints must use loopback HTTP. Discovery cannot target arbitrary internal or public hosts.
+- A local service's Bearer token is read from an environment variable and used only for its upstream connection.
+- The public OAuth token is never forwarded to an upstream service.
+- Admin endpoints are loopback-only and require the bridge's admin token.
+- The old combined `/mcp` resource is not mounted.
 
 ## Components
 
 | Module | Responsibility |
 | --- | --- |
-| `bridge/` | Express assembly, loopback listener, OAuth/MCP/tunnel/admin wiring |
-| `mcp/` | Read/status tools plus scoped Python write/execute surface |
-| `workspace/` | Path containment, sensitive-file policy, search and git views |
-| `execution/conda-environments.ts` | Read-only Conda discovery and opaque environment ids |
-| `execution/python-runner.ts` | Parent-side interpreter selection, process lifecycle, status handshake, timeout, cleanup and records |
-| `execution/python-sandbox-script.ts` | Strict unprivileged Linux sandbox bootstrap |
-| `execution/output.ts` | Sanitized execution output store |
-| `execution/records.ts` | Execution metadata history |
-| `auth/` | OAuth, workspace-bound tokens and scopes |
-| `tunnel/` | Cloudflare public transport |
-
-## Why not Bubblewrap here?
-
-Bubblewrap normally depends on user-namespace/UID-map behavior that can be disabled by site policy even when `unprivileged_userns_clone` appears enabled. This branch instead uses Landlock and seccomp directly, both applied by the unprivileged child itself, so it does not require administrator installation or subordinate UID/GID mappings.
+| `bridge/` | Express assembly, OAuth, per-service MCP routes, tunnel and admin wiring |
+| `mcp/local-registry.ts` | Local service discovery, tool snapshots, stable connector IDs and upstream routing |
+| `mcp/local-http.ts` | Tools-only MCP HTTP surface for one selected local service |
+| `auth/` | OAuth, service-bound tokens and token checks |
+| `pairing/` | One-time codes bound to one local service |
+| `tunnel/` | Shared Cloudflare public transport |

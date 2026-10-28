@@ -6,12 +6,13 @@ import type { Logger } from "../logger/index.js";
 export interface BearerAuthDeps {
   store: AuthStore;
   workspaceId: string;
-  getBaseUrl: (req: Request) => string;
+  expectedResource: (req: Request) => string;
+  getResourceMetadataUrl: (req: Request) => string;
   logger: Logger;
 }
 
 /**
- * Bearer-token guard for /mcp.
+ * Bearer-token guard for one service-specific MCP resource.
  * - missing/invalid/expired token  -> 401 (+ WWW-Authenticate with resource metadata)
  * - valid token for another workspace -> 403
  */
@@ -19,7 +20,7 @@ export function bearerAuth(deps: BearerAuthDeps) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const challenge = (error: string, description: string): string =>
       `Bearer realm="c2c", error="${error}", error_description="${description}", ` +
-      `resource_metadata="${deps.getBaseUrl(req)}/.well-known/oauth-protected-resource/mcp"`;
+      `resource_metadata="${deps.getResourceMetadataUrl(req)}"`;
 
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith("bearer ")) {
@@ -44,6 +45,14 @@ export function bearerAuth(deps: BearerAuthDeps) {
       res.status(403).json({
         error: "forbidden",
         error_description: "This token is not authorized for the connected workspace",
+      });
+      return;
+    }
+    if (verdict.record.resource !== deps.expectedResource(req)) {
+      deps.logger.warn("Rejected MCP request: token bound to a different local MCP service");
+      res.status(403).json({
+        error: "forbidden",
+        error_description: "This token is not authorized for this MCP service",
       });
       return;
     }

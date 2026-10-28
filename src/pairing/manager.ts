@@ -8,6 +8,7 @@ export interface PairingSession {
   id: string;
   codeHash: Buffer;
   workspaceId: string;
+  serverId?: string;
   createdAt: number;
   expiresAt: number;
   attemptsLeft: number;
@@ -83,13 +84,14 @@ export class PairingManager {
   }
 
   /** Create a new pairing session. Invalidates previous sessions (one active at a time). */
-  create(): { sessionId: string; code: string; expiresAt: number } {
+  create(serverId?: string): { sessionId: string; code: string; expiresAt: number } {
     this.sessions.clear();
     const raw = generateCode();
     const session: PairingSession = {
       id: randomBytes(16).toString("hex"),
       codeHash: hashCode(raw),
       workspaceId: this.workspaceId,
+      ...(serverId ? { serverId } : {}),
       createdAt: Date.now(),
       expiresAt: Date.now() + this.ttlMs,
       attemptsLeft: this.maxAttempts,
@@ -111,7 +113,7 @@ export class PairingManager {
     return entry.count <= this.ipRateLimit;
   }
 
-  verify(codeInput: string, ip?: string): PairingVerifyResult {
+  verify(codeInput: string, ip?: string, serverId?: string): PairingVerifyResult {
     if (!this.checkIpRate(ip)) {
       return { ok: false, reason: "rate_limited" };
     }
@@ -130,6 +132,9 @@ export class PairingManager {
       if (session.attemptsLeft <= 0) {
         this.sessions.delete(session.id);
         return { ok: false, reason: "too_many_attempts" };
+      }
+      if (session.serverId !== serverId) {
+        return { ok: false, reason: "invalid", attemptsLeft: session.attemptsLeft };
       }
       const match = timingSafeEqual(inputHash, session.codeHash);
       if (match) {
