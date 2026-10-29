@@ -8,6 +8,12 @@
 4. Each one-time pairing code is bound to one service ID and is consumed on use.
 5. Upstream local MCP services are trusted to implement their own tool permissions, including write or destructive operations.
 
+New access and refresh tokens have no time-based expiry. They remain usable
+for the exact service resource until the token is revoked, `c2c unpair` runs,
+or the service URL changes. This keeps authorization from expiring while a
+temporary tunnel URL remains stable; it also means a long-lived token should
+be revoked when access is no longer wanted.
+
 ## Local upstream connections
 
 - Configured endpoints must use HTTP on loopback and cannot include credentials in the URL.

@@ -67,6 +67,14 @@ describe("PairingManager", () => {
     expect(manager.verify(first.code).ok).toBe(false);
   });
 
+  it("keeps pairing codes for different services independent", () => {
+    const manager = new PairingManager("ws1");
+    const zotero = manager.create("zotero");
+    const openreview = manager.create("openreview");
+    expect(manager.verify(zotero.code, undefined, "zotero").ok).toBe(true);
+    expect(manager.verify(openreview.code, undefined, "openreview").ok).toBe(true);
+  });
+
   it("normalizes input", () => {
     expect(normalizePairingCode(" ab2-cd3 e ")).toBe("AB2CD3E");
     expect(formatPairingCode("ABCDEFGH")).toBe("ABCD-EFGH");

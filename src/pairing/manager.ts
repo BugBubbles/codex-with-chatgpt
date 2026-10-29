@@ -83,9 +83,13 @@ export class PairingManager {
     this.ipRateWindowMs = opts.ipRateWindowMs ?? 60_000;
   }
 
-  /** Create a new pairing session. Invalidates previous sessions (one active at a time). */
+  /** Create a new pairing session, replacing only the session for the same service. */
   create(serverId?: string): { sessionId: string; code: string; expiresAt: number } {
-    this.sessions.clear();
+    for (const [id, session] of this.sessions) {
+      if (!serverId || !session.serverId || session.serverId === serverId) {
+        this.sessions.delete(id);
+      }
+    }
     const raw = generateCode();
     const session: PairingSession = {
       id: randomBytes(16).toString("hex"),
@@ -121,7 +125,7 @@ export class PairingManager {
     const inputHash = hashCode(normalized);
     const now = Date.now();
 
-    const active = [...this.sessions.values()].filter((s) => !s.used);
+    const active = [...this.sessions.values()].filter((s) => !s.used && s.serverId === serverId);
     if (active.length === 0) return { ok: false, reason: "no_active_session" };
 
     for (const session of active) {

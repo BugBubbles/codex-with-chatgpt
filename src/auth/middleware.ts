@@ -60,7 +60,9 @@ export function bearerAuth(deps: BearerAuthDeps) {
       token,
       clientId: verdict.record.clientId,
       scopes: verdict.record.scopes,
-      expiresAt: Math.floor(verdict.record.expiresAt / 1000),
+      ...(verdict.record.expiresAt === null
+        ? {}
+        : { expiresAt: Math.floor(verdict.record.expiresAt / 1000) }),
     };
     (req as Request & { auth?: AuthInfo }).auth = authInfo;
     next();

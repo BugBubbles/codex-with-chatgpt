@@ -194,7 +194,7 @@ describe("independent local Streamable HTTP MCP connectors", () => {
     const summary = bridge.localMcp.summary();
     expect(summary.serverCount).toBe(2);
     expect(summary.toolCount).toBe(5);
-    expect(summary.servers.map((server) => server.id)).toEqual([alphaId, betaId].sort());
+    expect(summary.servers.map((server) => server.id).sort()).toEqual([alphaId, betaId].sort());
     expect(summary.servers.map((server) => server.endpoint).sort()).toEqual(
       [alpha.endpoint, beta.endpoint].sort()
     );

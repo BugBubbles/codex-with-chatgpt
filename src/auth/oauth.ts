@@ -371,7 +371,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.json({
         access_token: tokens.accessToken,
         token_type: "Bearer",
-        expires_in: tokens.expiresIn,
+        ...(tokens.expiresIn === null ? {} : { expires_in: tokens.expiresIn }),
         refresh_token: tokens.refreshToken ?? undefined,
         scope: tokens.scopes.join(" "),
       });
@@ -392,7 +392,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.json({
         access_token: result.tokens.accessToken,
         token_type: "Bearer",
-        expires_in: result.tokens.expiresIn,
+        ...(result.tokens.expiresIn === null ? {} : { expires_in: result.tokens.expiresIn }),
         refresh_token: result.tokens.refreshToken ?? undefined,
         scope: result.tokens.scopes.join(" "),
       });

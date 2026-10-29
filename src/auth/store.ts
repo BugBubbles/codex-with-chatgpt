@@ -37,7 +37,8 @@ export interface TokenRecord {
   scopes: string[];
   resource?: string;
   issuedAt: number;
-  expiresAt: number;
+  /** null means the token remains valid until explicitly revoked. */
+  expiresAt: number | null;
   revoked: boolean;
 }
 
@@ -50,9 +51,11 @@ export type VerifyTokenResult =
   | { ok: true; record: TokenRecord }
   | { ok: false; reason: "unknown" | "expired" | "revoked" | "wrong_kind" };
 
-const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
-const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
+
+function isUnexpired(token: TokenRecord, now: number): boolean {
+  return token.expiresAt === null || token.expiresAt > now;
+}
 
 function sha256hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -82,12 +85,20 @@ export class AuthStore {
 
   constructor(
     readonly workspaceId: string,
-    opts: { file?: string } = {}
+    opts: { file?: string; accessTokenTtlMs?: number | null } = {}
   ) {
+    this.accessTokenTtlMs = opts.accessTokenTtlMs ?? null;
     this.file =
       opts.file ?? path.join(ensureDir(path.join(getStateDir(), "auth")), `${workspaceId}.json`);
     this.load();
   }
+
+  /**
+   * Access tokens are non-expiring by default so OAuth authorization lasts as
+   * long as the service-specific public URL remains unchanged. Set a finite
+   * value only for deployments that require periodic reauthorization.
+   */
+  private readonly accessTokenTtlMs: number | null;
 
   private load(): void {
     const data = readJsonIfExists<PersistedAuthState>(this.file);
@@ -95,7 +106,7 @@ export class AuthStore {
     const now = Date.now();
     for (const client of data.clients ?? []) this.clients.set(client.clientId, client);
     for (const token of data.tokens ?? []) {
-      if (!token.revoked && token.expiresAt > now) this.tokens.set(token.hash, token);
+      if (!token.revoked && isUnexpired(token, now)) this.tokens.set(token.hash, token);
     }
   }
 
@@ -103,7 +114,7 @@ export class AuthStore {
     const now = Date.now();
     const state: PersistedAuthState = {
       clients: [...this.clients.values()],
-      tokens: [...this.tokens.values()].filter((t) => !t.revoked && t.expiresAt > now),
+      tokens: [...this.tokens.values()].filter((t) => !t.revoked && isUnexpired(t, now)),
     };
     writeSecureJson(this.file, state);
   }
@@ -167,11 +178,11 @@ export class AuthStore {
     scopes: string[];
     workspaceId?: string;
     resource?: string;
-    accessTtlMs?: number;
-  }): { accessToken: string; refreshToken: string | null; expiresIn: number; scopes: string[] } {
+    accessTtlMs?: number | null;
+  }): { accessToken: string; refreshToken: string | null; expiresIn: number | null; scopes: string[] } {
     const now = Date.now();
     const workspaceId = input.workspaceId ?? this.workspaceId;
-    const accessTtl = input.accessTtlMs ?? ACCESS_TOKEN_TTL_MS;
+    const accessTtl = input.accessTtlMs === undefined ? this.accessTokenTtlMs : input.accessTtlMs;
 
     const accessToken = newToken("c2c_at");
     this.tokens.set(sha256hex(accessToken), {
@@ -182,7 +193,7 @@ export class AuthStore {
       scopes: input.scopes,
       ...(input.resource ? { resource: input.resource } : {}),
       issuedAt: now,
-      expiresAt: now + accessTtl,
+      expiresAt: accessTtl === null ? null : now + accessTtl,
       revoked: false,
     });
 
@@ -195,8 +206,9 @@ export class AuthStore {
         clientId: input.clientId,
         workspaceId,
         scopes: input.scopes,
+        ...(input.resource ? { resource: input.resource } : {}),
         issuedAt: now,
-        expiresAt: now + REFRESH_TOKEN_TTL_MS,
+        expiresAt: accessTtl === null ? null : now + accessTtl,
         revoked: false,
       });
     }
@@ -204,7 +216,7 @@ export class AuthStore {
     return {
       accessToken,
       refreshToken,
-      expiresIn: Math.floor(accessTtl / 1000),
+      expiresIn: accessTtl === null ? null : Math.floor(accessTtl / 1000),
       scopes: input.scopes,
     };
   }
@@ -214,7 +226,7 @@ export class AuthStore {
     if (!record) return { ok: false, reason: "unknown" };
     if (record.kind !== "access") return { ok: false, reason: "wrong_kind" };
     if (record.revoked) return { ok: false, reason: "revoked" };
-    if (Date.now() > record.expiresAt) return { ok: false, reason: "expired" };
+    if (record.expiresAt !== null && Date.now() > record.expiresAt) return { ok: false, reason: "expired" };
     return { ok: true, record };
   }
 
@@ -226,7 +238,7 @@ export class AuthStore {
     const record = this.tokens.get(sha256hex(refreshToken));
     if (!record || record.kind !== "refresh") return { ok: false, reason: "invalid_grant" };
     if (record.revoked) return { ok: false, reason: "invalid_grant" };
-    if (Date.now() > record.expiresAt) return { ok: false, reason: "invalid_grant" };
+    if (record.expiresAt !== null && Date.now() > record.expiresAt) return { ok: false, reason: "invalid_grant" };
     if (record.clientId !== clientId) return { ok: false, reason: "invalid_client" };
     record.revoked = true;
     this.tokens.delete(record.hash);

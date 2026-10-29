@@ -10,7 +10,7 @@ Add each printed URL as a separate OAuth connector in ChatGPT. When an authoriza
 c2c pair --server <id>
 ```
 
-The code and OAuth token are restricted to that one MCP service. Pair services one at a time. The old combined `/mcp` connector is no longer served and should be removed after adding the individual connectors.
+The code and OAuth tokens are restricted to that one MCP service. Each service can have one active pairing code at a time; codes for different services remain valid independently. The old combined `/mcp` connector is no longer served and should be removed after adding the individual connectors.
 
 By default discovery scans `127.0.0.1`, ports `1-65535`, and path `/mcp`. Optional environment variables can narrow the scan or configure named loopback endpoints:
 

@@ -61,19 +61,27 @@ when the ChatGPT Authorize page is ready:
 c2c pair --server <id>
 ```
 
-Older codes become invalid immediately. Do not mint a code during `c2c doctor`.
+Creating a new code for the same service invalidates its previous code. Codes
+for different services can remain active at the same time. Do not mint a code
+during `c2c doctor`.
 
 ### Temporary address keeps dropping on a UDP-filtered network
 cloudflared defaults to QUIC. If the tunnel reconnects over and over on a
 corporate network, set `C2C_TUNNEL_PROTOCOL=http2` and restart the bridge.
 Leave it unset to keep cloudflared's default.
 
-### ChatGPT gets 401 on every tool call
-The access token expired and refresh failed (e.g. after `c2c unpair` or a
-long offline period). Delete and recreate the affected service connector if
-its address also changed; otherwise run Authorize again in ChatGPT and enter a
-fresh service-specific pairing code. Never use Reconnect when the public
-address has been replaced.
+### ChatGPT gets 401 or 403 on a tool call
+New access and refresh tokens do not expire by time; they remain valid until
+revoked and are restricted to the exact service URL used during authorization.
+Tokens issued before this policy change retain their original expiration, so
+authorize that connector once more to receive non-expiring tokens.
+
+A `401` means the token is missing, unknown, expired, or revoked. A `403` with
+`This token is not authorized for this MCP service` means the token belongs to
+a different service URL or public tunnel origin; it is not an expiry error.
+Update the affected connector to the current service URL, then authorize it
+with a fresh service-specific pairing code. Never use Reconnect when the
+public address has been replaced.
 
 ### cloudflared is not installed
 macOS: `brew install cloudflared`

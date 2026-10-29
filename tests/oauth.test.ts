@@ -381,6 +381,7 @@ describe("refresh token rotation", () => {
     const pairing = bridge.pairing.create(serviceId);
     const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
     const initial = await exchangeToken(clientId, code!, verifier);
+    expect(initial.body).not.toHaveProperty("expires_in");
 
     const refresh = async (refreshToken: string): Promise<{ status: number; body: Record<string, string> }> => {
       const response = await fetch(`${base}/oauth/token`, {
@@ -394,6 +395,18 @@ describe("refresh token rotation", () => {
     const rotated = await refresh(initial.body.refresh_token);
     expect(rotated.status).toBe(200);
     expect(rotated.body.refresh_token).not.toBe(initial.body.refresh_token);
+    expect(rotated.body).not.toHaveProperty("expires_in");
+
+    const mcpResponse = await fetch(resource, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${rotated.body.access_token}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    expect(mcpResponse.status).toBe(200);
 
     const replayed = await refresh(initial.body.refresh_token);
     expect(replayed.status).toBe(400);

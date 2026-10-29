@@ -18,7 +18,7 @@ When a service's OAuth page is open, generate its one-time pairing code:
 c2c pair -w <workspace> --server <id>
 ```
 
-Enter the code in that service's authorization page. It cannot authorize another MCP path. Pair services one at a time because generating another code invalidates the prior active code.
+Enter the code in that service's authorization page. It cannot authorize another MCP path. Each service can have one active pairing code at a time, and codes for different services remain valid independently.
 
 ## Tool behavior
 
