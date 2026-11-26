@@ -86,7 +86,7 @@ def env_int(name, default, minimum, maximum):
     return max(minimum, min(maximum, value))
 
 timeout_seconds = env_int("C2C_SANDBOX_TIMEOUT_SECONDS", 120, 1, 300)
-memory_bytes = env_int("C2C_SANDBOX_MEMORY_BYTES", 4 * 1024**3, 256 * 1024**2, 16 * 1024**3)
+memory_bytes = env_int("C2C_SANDBOX_MEMORY_BYTES", 32 * 1024**3, 256 * 1024**2, 32 * 1024**3)
 file_bytes = env_int("C2C_SANDBOX_FILE_BYTES", 64 * 1024**2, 8 * 1024**2, 512 * 1024**2)
 open_files = env_int("C2C_SANDBOX_OPEN_FILES", 128, 32, 1024)
 extra_processes = env_int("C2C_SANDBOX_EXTRA_PROCESSES", 32, 0, 128)

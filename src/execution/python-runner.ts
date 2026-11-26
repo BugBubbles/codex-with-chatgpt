@@ -224,8 +224,8 @@ function addSnapshotPath(
  * writes even when size/mtime are preserved. This lets us distinguish an
  * already-dirty file that Python touched again without reading large files.
  */
-function workspaceChangeSnapshot(workspace: Workspace): WorkspaceChangeSnapshot | null {
-  const result = runGit(workspace.root, [
+async function workspaceChangeSnapshot(workspace: Workspace): Promise<WorkspaceChangeSnapshot | null> {
+  const result = await runGit(workspace.root, [
     "status",
     "--porcelain=v2",
     "-z",
@@ -493,7 +493,7 @@ export async function executePython(
 
   const executionId = `py_exec_${randomBytes(8).toString("hex")}`;
   const timeoutSeconds = Math.max(1, Math.min(300, Math.floor(input.timeoutSeconds ?? 120)));
-  const changeSnapshotBefore = workspaceChangeSnapshot(workspace);
+  const changeSnapshotBefore = await workspaceChangeSnapshot(workspace);
   const sandboxTemp = makeSandboxTemp(workspace);
   const threads = pythonThreadPlan();
   const argv = [
@@ -570,70 +570,75 @@ export async function executePython(
       settled = true;
       clearTimeout(timer);
 
-      const sandbox = parseSandboxInfo(sandboxStatus);
-      if (!sandbox) {
+      void (async () => {
+        const sandbox = parseSandboxInfo(sandboxStatus);
+        if (!sandbox) {
+          removeSandboxTemp(sandboxTemp);
+          const detail = stderr.trim().split(/\r?\n/).slice(-3).join(" | ");
+          reject(
+            new PythonExecutionError(
+              "PYTHON_SANDBOX_FAILED",
+              detail
+                ? `Strict Python sandbox failed before user code ran: ${detail}`
+                : `Strict Python sandbox failed before user code ran (exit ${code ?? "null"}).`
+            )
+          );
+          return;
+        }
+
         removeSandboxTemp(sandboxTemp);
-        const detail = stderr.trim().split(/\r?\n/).slice(-3).join(" | ");
-        reject(
-          new PythonExecutionError(
-            "PYTHON_SANDBOX_FAILED",
-            detail
-              ? `Strict Python sandbox failed before user code ran: ${detail}`
-              : `Strict Python sandbox failed before user code ran (exit ${code ?? "null"}).`
-          )
+        const durationMs = Date.now() - startedAt;
+        const rawParts: string[] = [];
+        if (stdout) rawParts.push(`[stdout]\n${stdout}`);
+        if (stderr) rawParts.push(`[stderr]\n${stderr}`);
+        if (timedOut) rawParts.push(`[c2c]\nPython execution timed out after ${timeoutSeconds} seconds.`);
+        if (signal && !timedOut) rawParts.push(`[c2c]\nPython exited after signal ${signal}.`);
+        if (rawParts.length === 0) rawParts.push("(Python produced no output.)");
+
+        const output = saveExecutionOutput(workspace.id, {
+          command: commandLabel,
+          raw: rawParts.join("\n"),
+          exitCode: code,
+          taskId: executionId,
+          iteration: 0,
+        });
+        const files = changedFilesSince(changeSnapshotBefore, await workspaceChangeSnapshot(workspace));
+        appendExecutionRecord(workspace.id, {
+          taskId: executionId,
+          iteration: 0,
+          changedFiles: files,
+          tests: null,
+          exitStatus: timedOut ? "timeout" : code === 0 ? "ok" : "failed",
+          timestamp: new Date().toISOString(),
+          notes: timedOut
+            ? `Sandboxed Python execution timed out after ${timeoutSeconds} seconds.`
+            : `Sandboxed Python ${mode} execution completed${environmentNote}.`,
+          outputId: output.id,
+          outputAvailable: output.allowed,
+        });
+
+        const readable = output.allowed ? readExecutionOutput(workspace.id, output.id) : null;
+        const result: PythonExecuteResult = {
+          executionId,
+          mode,
+          exitCode: code,
+          timedOut,
+          durationMs,
+          outputId: output.id,
+          outputAvailable: output.allowed,
+          output: readable?.ok ? readable.text : null,
+          sandbox,
+          environment,
+          changedFiles: files,
+        };
+        logger.info(
+          `Python execution ${executionId} finished: mode=${mode} exit=${code ?? "null"} timedOut=${timedOut} sandbox=landlock+seccomp environment=${environment?.id ?? "default"} threads=${sandbox.threads.compute}/${sandbox.threads.available}`
         );
-        return;
-      }
-
-      removeSandboxTemp(sandboxTemp);
-      const durationMs = Date.now() - startedAt;
-      const rawParts: string[] = [];
-      if (stdout) rawParts.push(`[stdout]\n${stdout}`);
-      if (stderr) rawParts.push(`[stderr]\n${stderr}`);
-      if (timedOut) rawParts.push(`[c2c]\nPython execution timed out after ${timeoutSeconds} seconds.`);
-      if (signal && !timedOut) rawParts.push(`[c2c]\nPython exited after signal ${signal}.`);
-      if (rawParts.length === 0) rawParts.push("(Python produced no output.)");
-
-      const output = saveExecutionOutput(workspace.id, {
-        command: commandLabel,
-        raw: rawParts.join("\n"),
-        exitCode: code,
-        taskId: executionId,
-        iteration: 0,
+        resolve(result);
+      })().catch((error) => {
+        removeSandboxTemp(sandboxTemp);
+        reject(error);
       });
-      const files = changedFilesSince(changeSnapshotBefore, workspaceChangeSnapshot(workspace));
-      appendExecutionRecord(workspace.id, {
-        taskId: executionId,
-        iteration: 0,
-        changedFiles: files,
-        tests: null,
-        exitStatus: timedOut ? "timeout" : code === 0 ? "ok" : "failed",
-        timestamp: new Date().toISOString(),
-        notes: timedOut
-          ? `Sandboxed Python execution timed out after ${timeoutSeconds} seconds.`
-          : `Sandboxed Python ${mode} execution completed${environmentNote}.`,
-        outputId: output.id,
-        outputAvailable: output.allowed,
-      });
-
-      const readable = output.allowed ? readExecutionOutput(workspace.id, output.id) : null;
-      const result: PythonExecuteResult = {
-        executionId,
-        mode,
-        exitCode: code,
-        timedOut,
-        durationMs,
-        outputId: output.id,
-        outputAvailable: output.allowed,
-        output: readable?.ok ? readable.text : null,
-        sandbox,
-        environment,
-        changedFiles: files,
-      };
-      logger.info(
-        `Python execution ${executionId} finished: mode=${mode} exit=${code ?? "null"} timedOut=${timedOut} sandbox=landlock+seccomp environment=${environment?.id ?? "default"} threads=${sandbox.threads.compute}/${sandbox.threads.available}`
-      );
-      resolve(result);
     });
   });
 }

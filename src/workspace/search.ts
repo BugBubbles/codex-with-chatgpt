@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { Workspace } from "./manager.js";
+import { NOISE_PATTERNS } from "./ignore.js";
 
 export interface SearchOptions {
   query: string;
@@ -74,23 +75,25 @@ async function searchWithRipgrep(
   opts: SearchOptions,
   limit: number
 ): Promise<SearchResult> {
-  const args = ["--json", "--max-filesize", "2M", "--max-count", "20"];
+  const args = ["--json", "--max-filesize", "2M"];
   if (!opts.regex) args.push("-F");
   args.push("--smart-case");
   if (opts.glob) args.push("-g", opts.glob);
+  // Filter before rg reads files. Apply exclusions after a user include glob so
+  // it cannot re-enable dependencies/build output; retain the output-side policy.
+  for (const pattern of NOISE_PATTERNS) {
+    args.push("-g", `!**/${pattern.endsWith("/") ? pattern + "**" : pattern}`);
+  }
   args.push("--", opts.query, searchAbs);
 
   return new Promise((resolvePromise, reject) => {
     const child = spawn(rgBin, args, { cwd: ws.root, windowsHide: true });
     const matches: SearchMatch[] = [];
     let truncated = false;
+    child.stderr.resume();
     const rl = readline.createInterface({ input: child.stdout });
     rl.on("line", (line) => {
-      if (matches.length >= limit) {
-        truncated = true;
-        child.kill("SIGTERM");
-        return;
-      }
+      if (truncated) return;
       try {
         const event = JSON.parse(line) as {
           type: string;
@@ -99,6 +102,11 @@ async function searchWithRipgrep(
         if (event.type !== "match" || !event.data?.path?.text) return;
         const rel = path.relative(ws.root, event.data.path.text).split(path.sep).join("/");
         if (rel.startsWith("..") || ws.ignoreRules.isHidden(rel)) return;
+        if (matches.length >= limit) {
+          truncated = true;
+          child.kill("SIGTERM");
+          return;
+        }
         matches.push({
           path: rel,
           line: event.data.line_number ?? 0,
@@ -109,7 +117,11 @@ async function searchWithRipgrep(
       }
     });
     child.on("error", reject);
-    child.on("close", () => {
+    child.on("close", (code) => {
+      if (!truncated && code !== 0 && code !== 1) {
+        reject(new Error(`ripgrep failed (exit ${code ?? "null"})`));
+        return;
+      }
       resolvePromise({ matches, matchCount: matches.length, truncated, engine: "ripgrep" });
     });
   });
@@ -197,6 +209,10 @@ export async function searchWorkspace(ws: Workspace, opts: SearchOptions): Promi
   }
   const limit = Math.min(200, Math.max(1, Math.floor(opts.limit ?? 50)));
   const { abs } = ws.resolve(opts.path ?? ".");
+  const rel = path.relative(ws.root, abs).split(path.sep).join("/");
+  if (rel && (ws.ignoreRules.isHidden(rel) || ws.ignoreRules.isHidden(rel + "/"))) {
+    return { matches: [], matchCount: 0, truncated: false, engine: findRipgrep() ? "ripgrep" : "node" };
+  }
   const rg = findRipgrep();
   if (rg) {
     try {

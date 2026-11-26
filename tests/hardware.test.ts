@@ -20,8 +20,8 @@ describe("hardware information", () => {
     });
   });
 
-  it("returns a bounded resource snapshot without host identity fields", () => {
-    const hardware = collectHardwareInfo(process.cwd());
+  it("returns a bounded resource snapshot without host identity fields", async () => {
+    const hardware = await collectHardwareInfo(process.cwd());
 
     expect(hardware.system.platform).toBeTypeOf("string");
     expect(hardware.system.release).toBeTypeOf("string");

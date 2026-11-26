@@ -34,17 +34,45 @@ export function appendExecutionRecord(workspaceId: string, record: ExecutionReco
 
 export function readExecutionRecords(workspaceId: string, limit = 10): ExecutionRecord[] {
   const file = recordsFile(workspaceId);
-  if (!fs.existsSync(file)) return [];
-  const lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
+  let fd: number;
+  try {
+    fd = fs.openSync(file, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
   const records: ExecutionRecord[] = [];
   const requestedLimit = Math.max(1, Math.floor(limit));
-  for (let index = lines.length - 1; index >= 0 && records.length < requestedLimit; index--) {
+  const parse = (line: Buffer): void => {
     try {
-      const record = executionRecordSchema.safeParse(JSON.parse(lines[index]));
+      const record = executionRecordSchema.safeParse(JSON.parse(line.toString("utf8")));
       if (record.success) records.push(record.data);
     } catch {
       // skip corrupt lines
     }
+  };
+  try {
+    let position = fs.fstatSync(fd).size;
+    let suffix: Buffer[] = [];
+    const block = Buffer.allocUnsafe(16 * 1024);
+    while (position > 0 && records.length < requestedLimit) {
+      const length = Math.min(position, block.length);
+      position -= length;
+      const bytesRead = fs.readSync(fd, block, 0, length, position);
+      let end = bytesRead;
+      for (let index = bytesRead - 1; index >= 0; index--) {
+        if (block[index] !== 10) continue;
+        const line = Buffer.concat([block.subarray(index + 1, end), ...suffix]);
+        suffix = [];
+        if (line.length > 0) parse(line);
+        end = index;
+        if (records.length >= requestedLimit) break;
+      }
+      if (records.length < requestedLimit && end > 0) suffix.unshift(Buffer.from(block.subarray(0, end)));
+    }
+    if (records.length < requestedLimit && suffix.length > 0) parse(Buffer.concat(suffix));
+  } finally {
+    fs.closeSync(fd);
   }
   return records.reverse();
 }

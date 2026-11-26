@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 
 const COMMAND_TIMEOUT_MS = 1_500;
 const COMMAND_MAX_BUFFER = 128 * 1024;
@@ -101,23 +101,24 @@ function bytesFromDisplaySize(value: string | null): number | null {
   return Math.round(finiteNonNegative(parsed * multiplier));
 }
 
-function readText(filePath: string): string | null {
+async function readText(filePath: string): Promise<string | null> {
   try {
-    return fs.readFileSync(filePath, "utf8");
+    return await fs.promises.readFile(filePath, "utf8");
   } catch {
     return null;
   }
 }
 
-function runFixedCommand(command: string, args: string[]): string | null {
+async function runFixedCommand(command: string, args: string[]): Promise<string | null> {
   try {
-    const output = execFileSync(command, args, {
-      encoding: "utf8",
-      timeout: COMMAND_TIMEOUT_MS,
-      maxBuffer: COMMAND_MAX_BUFFER,
-      stdio: ["ignore", "pipe", "ignore"],
+    return await new Promise<string | null>((resolve) => {
+      execFile(command, args, {
+        encoding: "utf8",
+        timeout: COMMAND_TIMEOUT_MS,
+        maxBuffer: COMMAND_MAX_BUFFER,
+        windowsHide: true,
+      }, (error, stdout) => resolve(error ? null : stdout.trim() || null));
     });
-    return output.trim() || null;
   } catch {
     return null;
   }
@@ -139,8 +140,17 @@ function parseMeminfo(text: string | null): Map<string, number> {
   return result;
 }
 
-function detectPhysicalCores(): number | null {
-  const text = readText("/proc/cpuinfo");
+let physicalCoreCache: { expiresAt: number; value: Promise<number | null> } | undefined;
+
+function detectPhysicalCores(): Promise<number | null> {
+  if (!physicalCoreCache || physicalCoreCache.expiresAt <= Date.now()) {
+    physicalCoreCache = { expiresAt: Date.now() + 60_000, value: readPhysicalCores() };
+  }
+  return physicalCoreCache.value;
+}
+
+async function readPhysicalCores(): Promise<number | null> {
+  const text = await readText("/proc/cpuinfo");
   if (!text) return null;
 
   const pairs = new Set<string>();
@@ -166,7 +176,7 @@ function detectPhysicalCores(): number | null {
   return pairs.size > 0 ? pairs.size : null;
 }
 
-function collectCpuInfo(): CpuInfo {
+async function collectCpuInfo(): Promise<CpuInfo> {
   const cpus = os.cpus();
   const logicalCores = Math.max(1, cpus.length);
   const availableCores = Math.max(1, os.availableParallelism?.() ?? logicalCores);
@@ -176,7 +186,7 @@ function collectCpuInfo(): CpuInfo {
   return {
     model: cpus.find((cpu) => cpu.model.trim())?.model.trim() || null,
     architecture: os.arch(),
-    physicalCores: detectPhysicalCores(),
+    physicalCores: await detectPhysicalCores(),
     logicalCores,
     availableCores,
     maxFrequencyMHz: frequencies.length > 0 ? Math.max(...frequencies) : null,
@@ -188,8 +198,8 @@ function collectCpuInfo(): CpuInfo {
   };
 }
 
-function collectMemoryInfo(): MemoryInfo {
-  const meminfo = parseMeminfo(readText("/proc/meminfo"));
+async function collectMemoryInfo(): Promise<MemoryInfo> {
+  const meminfo = parseMeminfo(await readText("/proc/meminfo"));
   const totalBytes = meminfo.get("MemTotal") ?? finiteNonNegative(os.totalmem());
   const freeBytes = meminfo.get("MemFree") ?? finiteNonNegative(os.freemem());
   const availableBytes = Math.min(totalBytes, meminfo.get("MemAvailable") ?? freeBytes);
@@ -373,41 +383,51 @@ function parseLspciOutput(output: string): GpuInfo[] {
   return gpus;
 }
 
-function collectGpuInfo(): GpuInfo[] {
-  const nvidia = runFixedCommand("nvidia-smi", [
-    "--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu,driver_version",
-    "--format=csv,noheader,nounits",
-  ]);
-  if (nvidia) {
-    const parsed = parseNvidiaSmiOutput(nvidia);
-    if (parsed.length > 0) return parsed;
-  }
-
-  for (const [command, args] of [
-    ["amd-smi", ["list", "--json"]],
-    ["rocm-smi", ["--showproductname", "--showmeminfo", "vram", "--showuse", "--json"]],
-  ] as const) {
-    const amd = runFixedCommand(command, [...args]);
-    if (!amd) continue;
-    const parsed = parseAmdSmiOutput(amd);
-    if (parsed.length > 0) return parsed;
-  }
-
-  if (process.platform === "darwin") {
-    const profiler = runFixedCommand("system_profiler", ["SPDisplaysDataType", "-json"]);
-    if (profiler) {
-      const parsed = parseSystemProfilerOutput(profiler);
-      if (parsed.length > 0) return parsed;
-    }
-  }
-
-  const lspci = runFixedCommand("lspci", ["-nn"]);
-  return lspci ? parseLspciOutput(lspci) : [];
+interface GpuProbe {
+  command: string;
+  args: string[];
+  parse: (output: string) => GpuInfo[];
 }
 
-function collectStorageInfo(root: string): StorageInfo | null {
+const gpuProbes: GpuProbe[] = [
+  { command: "nvidia-smi", args: ["--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu,driver_version", "--format=csv,noheader,nounits"], parse: parseNvidiaSmiOutput },
+  { command: "amd-smi", args: ["list", "--json"], parse: parseAmdSmiOutput },
+  { command: "rocm-smi", args: ["--showproductname", "--showmeminfo", "vram", "--showuse", "--json"], parse: parseAmdSmiOutput },
+  ...(process.platform === "darwin" ? [{ command: "system_profiler", args: ["SPDisplaysDataType", "-json"], parse: parseSystemProfilerOutput }] : []),
+  { command: "lspci", args: ["-nn"], parse: parseLspciOutput },
+];
+let selectedGpuProbe: GpuProbe | undefined;
+let gpuCache: { expiresAt: number; value: GpuInfo[] } | undefined;
+let gpuPending: Promise<GpuInfo[]> | undefined;
+
+async function probeGpus(): Promise<GpuInfo[]> {
+  const preferred = selectedGpuProbe;
+  for (const probe of preferred ? [preferred, ...gpuProbes.filter((item) => item !== preferred)] : gpuProbes) {
+    const output = await runFixedCommand(probe.command, probe.args);
+    const parsed = output ? probe.parse(output) : [];
+    if (parsed.length > 0) {
+      selectedGpuProbe = probe;
+      return parsed;
+    }
+  }
+  selectedGpuProbe = undefined;
+  return [];
+}
+
+async function collectGpuInfo(): Promise<GpuInfo[]> {
+  if (gpuCache && gpuCache.expiresAt > Date.now()) return gpuCache.value.map((gpu) => ({ ...gpu }));
+  if (!gpuPending) {
+    gpuPending = probeGpus().then((value) => {
+      gpuCache = { value, expiresAt: Date.now() + (value.length > 0 ? 5_000 : 30_000) };
+      return value;
+    }).finally(() => { gpuPending = undefined; });
+  }
+  return (await gpuPending).map((gpu) => ({ ...gpu }));
+}
+
+async function collectStorageInfo(root: string): Promise<StorageInfo | null> {
   try {
-    const stats = fs.statfsSync(root);
+    const stats = await fs.promises.statfs(root);
     const blockSize = finiteNonNegative(Number(stats.bsize));
     if (blockSize <= 0) return null;
     const totalBytes = finiteNonNegative(Number(stats.blocks) * blockSize);
@@ -426,7 +446,10 @@ function collectStorageInfo(root: string): StorageInfo | null {
   }
 }
 
-export function collectHardwareInfo(workspaceRoot: string): HardwareInfo {
+export async function collectHardwareInfo(workspaceRoot: string): Promise<HardwareInfo> {
+  const [cpu, memory, gpus, storage] = await Promise.all([
+    collectCpuInfo(), collectMemoryInfo(), collectGpuInfo(), collectStorageInfo(workspaceRoot),
+  ]);
   return {
     system: {
       platform: os.platform(),
@@ -434,9 +457,9 @@ export function collectHardwareInfo(workspaceRoot: string): HardwareInfo {
       architecture: os.arch(),
       uptimeSeconds: finiteNonNegative(Math.floor(os.uptime())),
     },
-    cpu: collectCpuInfo(),
-    memory: collectMemoryInfo(),
-    gpus: collectGpuInfo(),
-    storage: collectStorageInfo(workspaceRoot),
+    cpu,
+    memory,
+    gpus,
+    storage,
   };
 }

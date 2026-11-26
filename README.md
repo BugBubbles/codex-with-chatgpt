@@ -69,7 +69,7 @@ If any sandbox step is unavailable or fails, `python_execute` returns `PYTHON_SA
 ### Default limits
 
 - Tool timeout: 120 seconds, maximum 300 seconds.
-- Address space: 4 GiB.
+- Address space: 32 GiB.
 - Per-file size: 64 MiB.
 - Open file descriptors: 128.
 - Additional processes/threads under the bridge user's UID: approximately 32 above the current UID **task/thread** count observed at sandbox setup.

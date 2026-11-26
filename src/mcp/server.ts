@@ -313,7 +313,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
       if (denied) return denied;
       try {
         const project = workspace.detectProject();
-        const git = gitInfo(workspace.root);
+        const [git, hardware] = await Promise.all([
+          gitInfo(workspace.root), collectHardwareInfo(workspace.root),
+        ]);
         return okStructured({
           workspaceId: workspace.id,
           workspaceName: workspace.name,
@@ -325,7 +327,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
             commit: git.commit,
             dirty: git.dirty,
           },
-          hardware: collectHardwareInfo(workspace.root),
+          hardware,
         });
       } catch (error) {
         return mapError(error);
@@ -366,7 +368,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
       title: "Read file",
       description:
         `Read a text file from the workspace with line-range pagination. Defaults to the first ` +
-        `400 lines; use start_line/end_line to page through large files. Sensitive files ` +
+        `400 lines; use start_line/end_line to page through large files. A single line ` +
+        `exceeding the response byte limit returns FILE_TOO_LARGE. Sensitive files ` +
         `(.env, keys, credentials) are always denied. ${UNTRUSTED_NOTE}`,
       inputSchema: {
         path: z.string().describe("Workspace-relative file path"),
@@ -428,7 +431,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "git.read");
       if (denied) return denied;
       try {
-        return okStructured(gitStatus(workspace));
+        return okStructured(await gitStatus(workspace));
       } catch (error) {
         return mapError(error);
       }
@@ -460,7 +463,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
           relPath = workspace.resolve(args.path).rel;
         }
         return okStructured(
-          gitDiff(
+          await gitDiff(
             workspace,
             { mode: args.mode as DiffMode, offset: args.offset, maxBytes: args.max_bytes },
             relPath

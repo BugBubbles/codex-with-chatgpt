@@ -4,6 +4,15 @@ import os from "node:os";
 import path from "node:path";
 
 const MAX_METADATA_BYTES = 1024 * 1024;
+const DISCOVERY_TTL_MS = 5_000;
+const metadataCache = new Map<string, {
+  directoryStamp: string;
+  pythonFile: string | null;
+  pythonStamp: string;
+  packageCount: number;
+  pythonVersion: string | null;
+  checkedAt: number;
+}>();
 const KNOWN_HOME_ROOTS = [
   "miniconda3",
   "anaconda3",
@@ -105,8 +114,23 @@ function readRegisteredPrefixes(home: string): string[] {
   }
 }
 
+function fileStamp(file: string): string {
+  try {
+    const stat = fs.statSync(file, { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch {
+    return "missing";
+  }
+}
+
 function packageMetadata(prefix: string): { packageCount: number; pythonVersion: string | null } {
   const metaDir = path.join(prefix, "conda-meta");
+  const directoryStamp = fileStamp(metaDir);
+  const cached = metadataCache.get(prefix);
+  if (cached && cached.directoryStamp === directoryStamp &&
+      (cached.pythonFile ? cached.pythonStamp === fileStamp(cached.pythonFile) : Date.now() - cached.checkedAt < DISCOVERY_TTL_MS)) {
+    return { packageCount: cached.packageCount, pythonVersion: cached.pythonVersion };
+  }
   let entries: string[];
   try {
     entries = fs.readdirSync(metaDir).filter((name) => name.endsWith(".json"));
@@ -115,19 +139,34 @@ function packageMetadata(prefix: string): { packageCount: number; pythonVersion:
   }
 
   let pythonVersion: string | null = null;
-  for (const name of entries) {
+  let pythonFile: string | null = null;
+  // Standard Conda filenames identify Python directly; retain a fallback for
+  // nonstandard metadata names without reading every package on normal installs.
+  const candidates = entries.filter((name) => /^python-\d/.test(name));
+  const others = entries.filter((name) => !/^python-\d/.test(name));
+  for (const name of [...candidates, ...others]) {
     if (pythonVersion !== null) break;
     const file = path.join(metaDir, name);
     try {
       const stat = fs.statSync(file);
       if (!stat.isFile() || stat.size > MAX_METADATA_BYTES) continue;
       const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { name?: unknown; version?: unknown };
-      if (parsed.name === "python" && typeof parsed.version === "string") pythonVersion = parsed.version;
+      if (parsed.name === "python" && typeof parsed.version === "string") {
+        pythonVersion = parsed.version;
+        pythonFile = file;
+      }
     } catch {
       // Malformed package metadata should not make environment discovery fail.
     }
   }
-  return { packageCount: entries.length, pythonVersion };
+  const result = { packageCount: entries.length, pythonVersion };
+  if (metadataCache.size >= 64) metadataCache.delete(metadataCache.keys().next().value!);
+  metadataCache.set(prefix, {
+    ...result, directoryStamp, pythonFile,
+    pythonStamp: pythonFile ? fileStamp(pythonFile) : "missing",
+    checkedAt: Date.now(),
+  });
+  return result;
 }
 
 function envId(prefix: string): string {
@@ -165,8 +204,26 @@ function scanRoot(rootCandidate: string, prefixes: Set<string>, basePrefixes: Se
  * Discover Conda environments without invoking conda/mamba or executing any
  * environment hook. Only filesystem metadata and executable presence are read.
  */
-export function listCondaEnvironments(): CondaEnvironmentInfo[] {
+interface Discovery {
+  key: string;
+  expiresAt: number;
+  prefixes: Set<string>;
+  basePrefixes: Set<string>;
+  currentPrefix: string | null;
+  directories: Map<string, string>;
+}
+
+let discovery: Discovery | undefined;
+
+function discoverPrefixes(): Discovery {
   const home = os.homedir();
+  const key = JSON.stringify([
+    home, configuredPythonCommand(), process.env.PATH, process.env.C2C_CONDA_ROOTS,
+    Object.entries(process.env).filter(([name]) => name === "CONDA_PREFIX" || /^CONDA_PREFIX_\d+$/.test(name)).sort(),
+    fileStamp(path.join(home, ".conda", "environments.txt")),
+  ]);
+  if (discovery?.key === key && discovery.expiresAt > Date.now() &&
+      [...discovery.directories].every(([dir, expected]) => fileStamp(dir) === expected)) return discovery;
   const prefixes = new Set<string>();
   const roots = new Set<string>();
   const basePrefixes = new Set<string>();
@@ -209,20 +266,37 @@ export function listCondaEnvironments(): CondaEnvironmentInfo[] {
 
   for (const root of roots) scanRoot(root, prefixes, basePrefixes);
 
+  const directories = new Map<string, string>();
+  for (const root of roots) {
+    directories.set(root, fileStamp(root));
+    directories.set(path.join(root, "envs"), fileStamp(path.join(root, "envs")));
+  }
+  discovery = { key, expiresAt: Date.now() + DISCOVERY_TTL_MS, prefixes, basePrefixes, currentPrefix, directories };
+  return discovery;
+}
+
+function environmentInfo(prefix: string, discovered: Discovery): CondaEnvironmentInfo | null {
+  // Execution must revalidate the selected prefix/interpreter even when its
+  // discovery and package metadata were cached.
+  if (safeRealpath(prefix) !== prefix || !isDirectory(path.join(prefix, "conda-meta"))) return null;
+  const python = pythonInPrefix(prefix);
+  if (!python) return null;
+  return {
+    id: envId(prefix),
+    name: discovered.basePrefixes.has(prefix) ? "base" : path.basename(prefix),
+    prefix,
+    python,
+    ...packageMetadata(prefix),
+    isDefault: discovered.currentPrefix === prefix,
+  };
+}
+
+export function listCondaEnvironments(): CondaEnvironmentInfo[] {
+  const discovered = discoverPrefixes();
   const result: CondaEnvironmentInfo[] = [];
-  for (const prefix of prefixes) {
-    const python = pythonInPrefix(prefix);
-    if (!python) continue;
-    const meta = packageMetadata(prefix);
-    result.push({
-      id: envId(prefix),
-      name: basePrefixes.has(prefix) ? "base" : path.basename(prefix),
-      prefix,
-      python,
-      pythonVersion: meta.pythonVersion,
-      packageCount: meta.packageCount,
-      isDefault: currentPrefix === prefix,
-    });
+  for (const prefix of discovered.prefixes) {
+    const info = environmentInfo(prefix, discovered);
+    if (info) result.push(info);
   }
 
   return result.sort(
@@ -234,5 +308,9 @@ export function listCondaEnvironments(): CondaEnvironmentInfo[] {
 }
 
 export function findCondaEnvironment(id: string): CondaEnvironmentInfo | null {
-  return listCondaEnvironments().find((environment) => environment.id === id) ?? null;
+  const discovered = discoverPrefixes();
+  for (const prefix of discovered.prefixes) {
+    if (envId(prefix) === id) return environmentInfo(prefix, discovered);
+  }
+  return null;
 }

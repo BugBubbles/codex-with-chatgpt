@@ -23,31 +23,31 @@ afterAll(() => {
 });
 
 describe("gitInfo", () => {
-  it("reports branch, commit and dirty state", () => {
-    const clean = gitInfo(repo);
+  it("reports branch, commit and dirty state", async () => {
+    const clean = await gitInfo(repo);
     expect(clean.isRepo).toBe(true);
     expect(clean.branch).toBe("main");
     expect(clean.commit).toMatch(/^[a-f0-9]{7,}$/);
     expect(clean.dirty).toBe(false);
 
     write(repo, "hello.txt", "changed\n");
-    expect(gitInfo(repo).dirty).toBe(true);
+    expect((await gitInfo(repo)).dirty).toBe(true);
     git(repo, "checkout", "--", "hello.txt");
   });
 
-  it("handles non-repos gracefully", () => {
-    expect(gitInfo(plain).isRepo).toBe(false);
+  it("handles non-repos gracefully", async () => {
+    expect((await gitInfo(plain)).isRepo).toBe(false);
   });
 });
 
 describe("gitStatus", () => {
-  it("categorizes staged, unstaged and untracked files", () => {
+  it("categorizes staged, unstaged and untracked files", async () => {
     write(repo, "hello.txt", "modified content\n");
     write(repo, "staged.txt", "new staged file\n");
     write(repo, "untracked.txt", "new file\n");
     git(repo, "add", "staged.txt");
 
-    const status = gitStatus(repo);
+    const status = await gitStatus(repo);
     expect(status.isRepo).toBe(true);
     expect(status.branch).toBe("main");
     expect(status.unstaged.map((entry) => entry.path)).toContain("hello.txt");
@@ -58,13 +58,13 @@ describe("gitStatus", () => {
     git(repo, "checkout", "--", "hello.txt");
   });
 
-  it("omits sensitive and .c2cignore'd paths from the names ChatGPT sees", () => {
+  it("omits sensitive and .c2cignore'd paths from the names ChatGPT sees", async () => {
     write(repo, ".c2cignore", "private-notes/\n");
     write(repo, ".env", "SECRET_KEY=leaked-env\n");
     write(repo, "private-notes/secret.md", "CONFIDENTIAL DATA\n");
     write(repo, "public.txt", "PUBLIC CONTENT\n");
 
-    const status = gitStatus(repo);
+    const status = await gitStatus(repo);
     expect(status.untracked).toContain("public.txt");
     expect(status.untracked).not.toContain(".env");
     expect(status.untracked).not.toContain("private-notes/secret.md");
@@ -78,9 +78,9 @@ describe("gitStatus", () => {
 });
 
 describe("gitDiff pagination", () => {
-  it("returns the full diff when small", () => {
+  it("returns the full diff when small", async () => {
     write(repo, "hello.txt", "a different greeting\n");
-    const diff = gitDiff(repo, { mode: "unstaged" });
+    const diff = await gitDiff(repo, { mode: "unstaged" });
     expect(diff.isRepo).toBe(true);
     expect(diff.diff).toContain("a different greeting");
     expect(diff.hasMore).toBe(false);
@@ -88,15 +88,15 @@ describe("gitDiff pagination", () => {
     git(repo, "checkout", "--", "hello.txt");
   });
 
-  it("paginates on byte offsets and never splits lines", () => {
+  it("paginates on byte offsets and never splits lines", async () => {
     const lines = Array.from({ length: 5000 }, (_, i) => `line-${i}-${"x".repeat(40)}`).join("\n");
     write(repo, "hello.txt", lines);
-    const first = gitDiff(repo, { mode: "unstaged", maxBytes: 8192 });
+    const first = await gitDiff(repo, { mode: "unstaged", maxBytes: 8192 });
     expect(first.hasMore).toBe(true);
     expect(first.diff.endsWith("\n")).toBe(true);
     expect(first.nextOffset).toBe(first.returnedBytes);
 
-    const second = gitDiff(repo, { mode: "unstaged", offset: first.nextOffset!, maxBytes: 8192 });
+    const second = await gitDiff(repo, { mode: "unstaged", offset: first.nextOffset!, maxBytes: 8192 });
     expect(second.offset).toBe(first.nextOffset);
     expect(second.diff.length).toBeGreaterThan(0);
 
@@ -104,7 +104,7 @@ describe("gitDiff pagination", () => {
     let offset = 0;
     let assembled = "";
     for (let hop = 0; hop < 1000; hop++) {
-      const page = gitDiff(repo, { mode: "unstaged", offset, maxBytes: 65536 });
+      const page = await gitDiff(repo, { mode: "unstaged", offset, maxBytes: 65536 });
       assembled += page.diff;
       if (!page.hasMore) break;
       offset = page.nextOffset!;
@@ -113,29 +113,29 @@ describe("gitDiff pagination", () => {
     git(repo, "checkout", "--", "hello.txt");
   });
 
-  it("excludes sensitive files from full-repo diffs", () => {
+  it("excludes sensitive files from full-repo diffs", async () => {
     write(repo, ".env", "SECRET=1\n");
     git(repo, "add", "-f", ".env");
     write(repo, ".env", "SECRET=leaked-value\n");
-    const diff = gitDiff(repo, { mode: "unstaged" });
+    const diff = await gitDiff(repo, { mode: "unstaged" });
     expect(diff.diff).not.toContain("leaked-value");
     git(repo, "rm", "-f", "--cached", ".env");
   });
 
-  it("excludes sensitive files from directory-scoped diffs", () => {
+  it("excludes sensitive files from directory-scoped diffs", async () => {
     write(repo, "private/.env", "SECRET=1\n");
     git(repo, "add", "-f", "private/.env");
-    const diff = gitDiff(repo, { mode: "staged" }, "private");
+    const diff = await gitDiff(repo, { mode: "staged" }, "private");
     expect(diff.diff).not.toContain("SECRET=1");
     git(repo, "rm", "-f", "--cached", "private/.env");
   });
 
-  it("handles non-repos gracefully", () => {
-    const diff = gitDiff(plain, { mode: "unstaged" });
+  it("handles non-repos gracefully", async () => {
+    const diff = await gitDiff(plain, { mode: "unstaged" });
     expect(diff.isRepo).toBe(false);
   });
 
-  it("excludes all IgnoreRules sensitive patterns across unstaged, staged, and head modes", () => {
+  it("excludes all IgnoreRules sensitive patterns across unstaged, staged, and head modes", async () => {
     const sensitiveFiles = [
       { path: ".env", content: "SECRET_KEY=leaked-env\n", sentinel: "leaked-env" },
       { path: ".npmrc", content: "//registry.npmjs.org/:_authToken=leaked-npm\n", sentinel: "leaked-npm" },
@@ -159,7 +159,7 @@ describe("gitDiff pagination", () => {
     }
 
     // 1. Staged mode
-    const stagedDiff = gitDiff(repo, { mode: "staged" });
+    const stagedDiff = await gitDiff(repo, { mode: "staged" });
     for (const item of sensitiveFiles) {
       expect(stagedDiff.diff).not.toContain(item.sentinel);
     }
@@ -173,7 +173,7 @@ describe("gitDiff pagination", () => {
     }
     write(repo, "src/safe.ts", "export const safe = 2; // modified-safe\n");
 
-    const unstagedDiff = gitDiff(repo, { mode: "unstaged" });
+    const unstagedDiff = await gitDiff(repo, { mode: "unstaged" });
     expect(unstagedDiff.diff).toContain("modified-safe");
     for (const item of sensitiveFiles) {
       expect(unstagedDiff.diff).not.toContain(item.sentinel);
@@ -181,7 +181,7 @@ describe("gitDiff pagination", () => {
     }
 
     // 3. Head mode
-    const headDiff = gitDiff(repo, { mode: "head" });
+    const headDiff = await gitDiff(repo, { mode: "head" });
     expect(headDiff.diff).toContain("modified-safe");
     for (const item of sensitiveFiles) {
       expect(headDiff.diff).not.toContain(item.sentinel);
@@ -191,12 +191,12 @@ describe("gitDiff pagination", () => {
     git(repo, "checkout", "--", "src/safe.ts", ...sensitiveFiles.map((s) => s.path));
   });
 
-  it("allows .env.example while blocking .env", () => {
+  it("allows .env.example while blocking .env", async () => {
     write(repo, ".env.example", "API_URL=https://example.com\n");
     write(repo, ".env", "API_KEY=supersecret-123\n");
     git(repo, "add", "-f", ".env.example", ".env");
 
-    const diff = gitDiff(repo, { mode: "staged" });
+    const diff = await gitDiff(repo, { mode: "staged" });
     expect(diff.diff).toContain(".env.example");
     expect(diff.diff).toContain("https://example.com");
     expect(diff.diff).not.toContain("supersecret-123");
@@ -204,14 +204,14 @@ describe("gitDiff pagination", () => {
     git(repo, "rm", "-f", "--cached", ".env.example", ".env");
   });
 
-  it("respects custom rules in .c2cignore for git diff", () => {
+  it("respects custom rules in .c2cignore for git diff", async () => {
     write(repo, ".c2cignore", "private-notes/\ncustom-secret.txt\n");
     write(repo, "private-notes/secret.md", "CONFIDENTIAL DATA\n");
     write(repo, "custom-secret.txt", "TOP_SECRET_FLAG=1\n");
     write(repo, "public.txt", "PUBLIC CONTENT\n");
     git(repo, "add", "-f", ".c2cignore", "private-notes/secret.md", "custom-secret.txt", "public.txt");
 
-    const diff = gitDiff(repo, { mode: "staged" });
+    const diff = await gitDiff(repo, { mode: "staged" });
     expect(diff.diff).toContain("public.txt");
     expect(diff.diff).toContain("PUBLIC CONTENT");
     expect(diff.diff).not.toContain("CONFIDENTIAL DATA");
@@ -220,7 +220,7 @@ describe("gitDiff pagination", () => {
     git(repo, "rm", "-f", "--cached", ".c2cignore", "private-notes/secret.md", "custom-secret.txt", "public.txt");
   });
 
-  it("handles rename provenance: sensitive->safe, safe->sensitive, safe->safe", () => {
+  it("handles rename provenance: sensitive->safe, safe->sensitive, safe->safe", async () => {
     // 1. Commit baseline files
     write(repo, "old_safe.ts", "export const value = 'old-safe-data';\n");
     write(repo, ".npmrc", "//registry.npmjs.org/:_authToken=npm-secret-token\n");
@@ -235,7 +235,7 @@ describe("gitDiff pagination", () => {
     // Case C: Safe -> Sensitive rename (Must be excluded!)
     git(repo, "mv", "public_to_secret.txt", ".env.secret");
 
-    const stagedDiff = gitDiff(repo, { mode: "staged" });
+    const stagedDiff = await gitDiff(repo, { mode: "staged" });
 
     // Safe->safe rename should appear
     expect(stagedDiff.diff).toContain("old_safe.ts");
@@ -253,7 +253,7 @@ describe("gitDiff pagination", () => {
     git(repo, "reset", "--hard", "HEAD");
   });
 
-  it("prevents cross-boundary scoped rename provenance leaks with path= scoping", () => {
+  it("prevents cross-boundary scoped rename provenance leaks with path= scoping", async () => {
     // Baseline files
     write(repo, ".npmrc", "//registry.npmjs.org/:_authToken=cross-scope-secret\n");
     write(repo, "src/.npmrc", "//registry.npmjs.org/:_authToken=src-secret\n");
@@ -274,7 +274,7 @@ describe("gitDiff pagination", () => {
     // 4. src/.npmrc renamed to root_secret_leak.txt -> scoped git_diff(path="src")
     git(repo, "mv", "src/.npmrc", "root_secret_leak.txt");
 
-    const srcDiff = gitDiff(repo, { mode: "staged" }, "src");
+    const srcDiff = await gitDiff(repo, { mode: "staged" }, "src");
 
     // Safe cross-scope rename is visible
     expect(srcDiff.diff).toContain("root_safe.ts");

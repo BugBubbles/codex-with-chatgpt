@@ -68,6 +68,7 @@ If sandbox setup fails, no user Python runs and the tool returns `PYTHON_SANDBOX
 | `bridge/` | Express assembly, loopback listener, OAuth/MCP/tunnel/admin wiring |
 | `mcp/` | Read/status tools plus scoped Python write/execute surface |
 | `workspace/` | Path containment, sensitive-file policy, search and git views |
+| `workspace/text-file.ts` | Bounded sparse line indexes and byte-limited text pagination |
 | `execution/conda-environments.ts` | Read-only Conda discovery and opaque environment ids |
 | `execution/python-runner.ts` | Parent-side interpreter selection, process lifecycle, status handshake, timeout, cleanup and records |
 | `execution/python-sandbox-script.ts` | Strict unprivileged Linux sandbox bootstrap |
@@ -75,6 +76,10 @@ If sandbox setup fails, no user Python runs and the tool returns `PYTHON_SANDBOX
 | `execution/records.ts` | Execution metadata history |
 | `auth/` | OAuth, workspace-bound tokens and scopes |
 | `tunnel/` | Cloudflare public transport |
+
+Text pagination builds an exact line count once per file version, then reads from sparse byte offsets. The in-memory cache holds at most 16 indexes with at most 32,768 offsets each; device/inode, size, mtime and ctime changes invalidate an index. Reads are bounded to the observed file size and retry once if the file changes. A line exceeding the response byte limit returns `FILE_TOO_LARGE`. Directory pagination counts all visible entries but fetches file sizes only for the returned page, with at most 16 concurrent requests.
+
+Git commands and hardware probes run asynchronously. Paginated Git patches share a cache bounded to eight snapshots and 64 MiB, expire after 30 seconds, and are checked against the current Git inventory and filesystem metadata before reuse. Conda discovery caches its inventory for up to five seconds, invalidates it when discovery inputs or scanned directories change, and revalidates the selected prefix/interpreter on execution. Package metadata is invalidated by metadata-directory and Python-record changes. GPU probes coalesce concurrent requests and cache readings for five seconds (30 seconds when no GPU is found); CPU topology is cached for 60 seconds, while load, memory and storage are sampled for each request. Execution history reads backwards in 16 KiB blocks until enough valid records are found.
 
 ## Why not Bubblewrap here?
 

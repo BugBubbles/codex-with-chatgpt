@@ -1,29 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import readline from "node:readline";
 import { IgnoreRules } from "./ignore.js";
 import { readJsonIfExists } from "../config/paths.js";
-
-export type WorkspaceErrorCode =
-  | "INVALID_PATH"
-  | "PATH_OUTSIDE_WORKSPACE"
-  | "ACCESS_DENIED_SENSITIVE_FILE"
-  | "FILE_NOT_FOUND"
-  | "NOT_A_FILE"
-  | "NOT_A_DIRECTORY"
-  | "BINARY_FILE"
-  | "FILE_TOO_LARGE";
-
-export class WorkspaceError extends Error {
-  constructor(
-    public code: WorkspaceErrorCode,
-    message: string
-  ) {
-    super(message);
-    this.name = "WorkspaceError";
-  }
-}
+import { WorkspaceError } from "./errors.js";
+import { readIndexedTextFile, type TextReadOptions } from "./text-file.js";
+export { WorkspaceError, type WorkspaceErrorCode } from "./errors.js";
 
 const CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
 const normCase = (p: string): string => (CASE_INSENSITIVE ? p.toLowerCase() : p);
@@ -76,10 +58,6 @@ function stringRecord(value: unknown): Record<string, string> {
   );
   return Object.fromEntries(entries);
 }
-
-const DEFAULT_MAX_LINES = 400;
-const HARD_MAX_LINES = 2000;
-const DEFAULT_MAX_BYTES = 256 * 1024;
 
 export class Workspace {
   readonly root: string;
@@ -169,80 +147,9 @@ export class Workspace {
     return { abs: canonical, rel };
   }
 
-  private async isBinary(abs: string): Promise<boolean> {
-    const fd = await fs.promises.open(abs, "r");
-    try {
-      const buf = Buffer.alloc(8192);
-      const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
-      for (let i = 0; i < bytesRead; i++) {
-        if (buf[i] === 0) return true;
-      }
-      return false;
-    } finally {
-      await fd.close();
-    }
-  }
-
-  async readFile(
-    requested: string,
-    opts: { startLine?: number; endLine?: number; maxLines?: number; maxBytes?: number } = {}
-  ): Promise<ReadFileResult> {
+  async readFile(requested: string, opts: TextReadOptions = {}): Promise<ReadFileResult> {
     const { abs, rel } = this.resolve(requested);
-    let stat: fs.Stats;
-    try {
-      stat = await fs.promises.stat(abs);
-    } catch {
-      throw new WorkspaceError("FILE_NOT_FOUND", `File not found: ${rel}`);
-    }
-    if (!stat.isFile()) {
-      throw new WorkspaceError("NOT_A_FILE", `Not a regular file: ${rel}`);
-    }
-    if (await this.isBinary(abs)) {
-      throw new WorkspaceError("BINARY_FILE", `Binary file (${stat.size} bytes): ${rel}. Content is not returned.`);
-    }
-
-    const startLine = Math.max(1, Math.floor(opts.startLine ?? 1));
-    const maxLines = Math.min(HARD_MAX_LINES, Math.max(1, Math.floor(opts.maxLines ?? DEFAULT_MAX_LINES)));
-    const endLimit = opts.endLine
-      ? Math.min(Math.floor(opts.endLine), startLine + HARD_MAX_LINES - 1)
-      : startLine + maxLines - 1;
-    const maxBytes = Math.min(1024 * 1024, Math.max(1024, Math.floor(opts.maxBytes ?? DEFAULT_MAX_BYTES)));
-
-    const lines: string[] = [];
-    let totalLines = 0;
-    let collectedBytes = 0;
-    let byteTruncated = false;
-    let actualEnd = startLine - 1;
-
-    const stream = fs.createReadStream(abs, { encoding: "utf8" });
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    for await (const line of rl) {
-      totalLines++;
-      if (totalLines >= startLine && totalLines <= endLimit && !byteTruncated) {
-        const cost = Buffer.byteLength(line, "utf8") + 1;
-        if (collectedBytes + cost > maxBytes && lines.length > 0) {
-          byteTruncated = true;
-        } else {
-          lines.push(line);
-          collectedBytes += cost;
-          actualEnd = totalLines;
-        }
-      }
-    }
-    rl.close();
-
-    const remaining = Math.max(0, totalLines - actualEnd);
-    return {
-      path: rel,
-      sizeBytes: stat.size,
-      totalLines,
-      startLine: Math.min(startLine, Math.max(totalLines, 1)),
-      endLine: actualEnd,
-      truncated: remaining > 0,
-      remainingLines: remaining,
-      nextStartLine: remaining > 0 ? actualEnd + 1 : null,
-      content: lines.join("\n"),
-    };
+    return readIndexedTextFile(abs, rel, opts);
   }
 
   async listDirectory(
@@ -263,7 +170,12 @@ export class Workspace {
     const limit = Math.min(1000, Math.max(1, Math.floor(opts.limit ?? 200)));
     const offset = Math.max(0, Math.floor(opts.offset ?? 0));
 
-    const all: DirEntry[] = [];
+    const page: DirEntry[] = [];
+    let total = 0;
+    const include = (entry: DirEntry): void => {
+      if (total >= offset && total < offset + limit) page.push(entry);
+      total++;
+    };
     const walk = async (dirAbs: string, dirRel: string, level: number): Promise<void> => {
       let entries: fs.Dirent[];
       try {
@@ -280,30 +192,33 @@ export class Workspace {
         const childRel = dirRel ? `${dirRel}/${entry.name}` : entry.name;
         if (this.ignoreRules.isHidden(childRel) || this.ignoreRules.isHidden(childRel + "/")) continue;
         if (entry.isDirectory()) {
-          all.push({ path: childRel + "/", type: "dir" });
+          include({ path: childRel + "/", type: "dir" });
           if (level < depth) await walk(path.join(dirAbs, entry.name), childRel, level + 1);
         } else if (entry.isFile()) {
-          let size: number | undefined;
-          try {
-            size = (await fs.promises.stat(path.join(dirAbs, entry.name))).size;
-          } catch {
-            size = undefined;
-          }
-          all.push({ path: childRel, type: "file", sizeBytes: size });
+          include({ path: childRel, type: "file" });
         }
-        if (all.length >= offset + limit + 2000) return; // hard cap for huge trees
       }
     };
     await walk(abs, rel, 1);
 
-    const page = all.slice(offset, offset + limit);
+    const files = page.filter((entry) => entry.type === "file");
+    // Bound concurrency and only stat files which will actually be returned.
+    for (let start = 0; start < files.length; start += 16) {
+      await Promise.all(files.slice(start, start + 16).map(async (entry) => {
+        try {
+          entry.sizeBytes = (await fs.promises.stat(path.join(this.root, entry.path))).size;
+        } catch {
+          // The entry may have disappeared since readdir.
+        }
+      }));
+    }
     return {
       path: rel || ".",
       entries: page,
-      total: all.length,
+      total,
       offset,
       limit,
-      hasMore: offset + page.length < all.length,
+      hasMore: offset + page.length < total,
     };
   }
 

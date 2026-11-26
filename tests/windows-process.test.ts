@@ -5,11 +5,16 @@ import { makeTmpDir, cleanup, makeGitRepo, write } from "./helpers.js";
 
 const spawnSyncCalls: { file: string; args: any[]; options: any }[] = [];
 const spawnCalls: { file: string; args: any[]; options: any }[] = [];
+const execFileCalls: { file: string; args: any[]; options: any }[] = [];
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return {
     ...actual,
+    execFile: (file: string, args: any, options: any, callback: any) => {
+      execFileCalls.push({ file, args, options });
+      return actual.execFile(file, args, options, callback);
+    },
     spawnSync: (file: string, args: any, options: any) => {
       spawnSyncCalls.push({ file, args, options });
       return actual.spawnSync(file, args, options);
@@ -34,6 +39,7 @@ describe("Windows background subprocess windowsHide: true (RED verification)", (
   beforeEach(() => {
     spawnSyncCalls.length = 0;
     spawnCalls.length = 0;
+    execFileCalls.length = 0;
     tmpDir = makeTmpDir("win-process-test");
   });
 
@@ -41,11 +47,11 @@ describe("Windows background subprocess windowsHide: true (RED verification)", (
     cleanup(tmpDir);
   });
 
-  it("1. runGit in src/workspace/git.ts passes windowsHide: true", () => {
+  it("1. runGit in src/workspace/git.ts passes windowsHide: true", async () => {
     makeGitRepo(tmpDir);
     spawnSyncCalls.length = 0;
-    runGit(tmpDir, ["status", "--porcelain"]);
-    const gitCall = spawnSyncCalls.find((c) => c.file === "git");
+    await runGit(tmpDir, ["status", "--porcelain"]);
+    const gitCall = execFileCalls.find((c) => c.file === "git");
     expect(gitCall).toBeDefined();
     expect(gitCall?.options).toHaveProperty("windowsHide", true);
   });

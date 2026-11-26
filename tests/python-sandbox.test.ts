@@ -205,7 +205,7 @@ describe("strict Python sandbox", () => {
       // denied by seccomp to prevent modifying peer-process limits.
       expect(result.sandbox.limits.openFiles).toBeLessThanOrEqual(128);
       expect(result.sandbox.limits.core).toBe(0);
-      expect(result.sandbox.limits.addressSpace).toBeLessThanOrEqual(4 * 1024 ** 3);
+      expect(result.sandbox.limits.addressSpace).toBeLessThanOrEqual(32 * 1024 ** 3);
       expect(result.sandbox.limits.fileSize).toBeLessThanOrEqual(64 * 1024 ** 2);
     } finally {
       if (previous === undefined) delete process.env.C2C_TEST_SECRET;

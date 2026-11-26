@@ -105,7 +105,7 @@ Defaults are deliberately finite:
 | Wall-clock tool timeout | 120 s |
 | Maximum requested timeout | 300 s |
 | CPU rlimit | timeout + 1 s soft / +2 s hard |
-| Address space | 4 GiB |
+| Address space | 32 GiB |
 | Per-file size | 64 MiB |
 | Open file descriptors | 128 |
 | Additional UID tasks/threads | ~32 above the current UID task count |
@@ -114,7 +114,7 @@ Defaults are deliberately finite:
 
 Bounded operator overrides:
 
-- `C2C_SANDBOX_MEMORY_BYTES`: 256 MiB–16 GiB.
+- `C2C_SANDBOX_MEMORY_BYTES`: 256 MiB–32 GiB.
 - `C2C_SANDBOX_FILE_BYTES`: 8–512 MiB.
 - `C2C_SANDBOX_OPEN_FILES`: 32–1024.
 - `C2C_SANDBOX_EXTRA_PROCESSES`: 0–128.
